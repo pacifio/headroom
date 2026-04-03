@@ -1137,7 +1137,11 @@ class CostTracker:
 class PrometheusMetrics:
     """Prometheus-compatible metrics."""
 
-    def __init__(self, savings_tracker: SavingsTracker | None = None):
+    def __init__(
+        self,
+        savings_tracker: SavingsTracker | None = None,
+        cost_tracker: CostTracker | None = None,
+    ):
         self.requests_total = 0
         self.requests_by_provider: dict[str, int] = defaultdict(int)
         self.requests_by_model: dict[str, int] = defaultdict(int)
@@ -1201,8 +1205,54 @@ class PrometheusMetrics:
         # Cumulative savings history (timestamp → cumulative tokens saved)
         self.savings_history: list[tuple[str, int]] = []
         self.savings_tracker = savings_tracker or SavingsTracker()
+        self.cost_tracker = cost_tracker
+        tracker_lifetime = self.savings_tracker.snapshot()["lifetime"]
+        self._savings_tracker_input_tokens_offset = max(
+            int(tracker_lifetime.get("total_input_tokens", 0) or 0),
+            0,
+        )
+        self._savings_tracker_input_cost_usd_offset = max(
+            float(tracker_lifetime.get("total_input_cost_usd", 0.0) or 0.0),
+            0.0,
+        )
 
         self._lock = asyncio.Lock()
+
+    def _current_savings_tracker_totals(self) -> tuple[int, float]:
+        total_input_tokens = self._savings_tracker_input_tokens_offset + self.tokens_input_total
+        total_input_cost_usd = self._savings_tracker_input_cost_usd_offset
+
+        if self.cost_tracker is None:
+            return total_input_tokens, total_input_cost_usd
+
+        try:
+            cost_stats = self.cost_tracker.stats()
+        except Exception:
+            logger.debug("Failed to read cost tracker totals for savings history", exc_info=True)
+            return total_input_tokens, total_input_cost_usd
+
+        tracked_input_tokens = cost_stats.get("total_input_tokens")
+        tracked_input_cost_usd = cost_stats.get("total_input_cost_usd")
+
+        if tracked_input_tokens is not None:
+            try:
+                total_input_tokens = self._savings_tracker_input_tokens_offset + max(
+                    int(tracked_input_tokens),
+                    0,
+                )
+            except (TypeError, ValueError):
+                pass
+
+        if tracked_input_cost_usd is not None:
+            try:
+                total_input_cost_usd = self._savings_tracker_input_cost_usd_offset + max(
+                    float(tracked_input_cost_usd),
+                    0.0,
+                )
+            except (TypeError, ValueError):
+                pass
+
+        return total_input_tokens, total_input_cost_usd
 
     async def record_request(
         self,
@@ -1219,6 +1269,7 @@ class PrometheusMetrics:
         waste_signals: dict[str, int] | None = None,
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
+        uncached_input_tokens: int = 0,
     ):
         """Record metrics for a request."""
         async with self._lock:
@@ -1292,11 +1343,17 @@ class PrometheusMetrics:
             if len(self.savings_history) > 500:
                 self.savings_history = self.savings_history[-500:]
 
-            if tokens_saved > 0:
-                self.savings_tracker.record_compression_savings(
-                    model=model,
-                    tokens_saved=tokens_saved,
-                )
+            total_input_tokens, total_input_cost_usd = self._current_savings_tracker_totals()
+            self.savings_tracker.record_request(
+                model=model,
+                input_tokens=input_tokens,
+                tokens_saved=tokens_saved,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                uncached_input_tokens=uncached_input_tokens,
+                total_input_tokens=total_input_tokens,
+                total_input_cost_usd=total_input_cost_usd,
+            )
 
     async def record_rate_limited(self):
         async with self._lock:
@@ -1603,7 +1660,7 @@ class HeadroomProxy:
             else None
         )
 
-        self.metrics = PrometheusMetrics()
+        self.metrics = PrometheusMetrics(cost_tracker=self.cost_tracker)
 
         # Prefix cache tracking: freeze already-cached messages to avoid
         # invalidating the provider's prefix cache with our transforms
@@ -3029,6 +3086,7 @@ class HeadroomProxy:
                     waste_signals=waste_signals_dict,
                     cache_read_tokens=cr_tokens,
                     cache_write_tokens=cw_tokens,
+                    uncached_input_tokens=uncached_input_tokens,
                 )
 
                 # Log request
@@ -4790,6 +4848,7 @@ class HeadroomProxy:
                     pipeline_timing=pipeline_timing,
                     cache_read_tokens=cache_read_tokens,
                     cache_write_tokens=cache_write_tokens,
+                    uncached_input_tokens=uncached_input_tokens,
                 )
 
         return StreamingResponse(
@@ -7333,6 +7392,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         - Request metrics (total, cached, failed, by model/provider)
         - Token usage and savings
         - Cost tracking
+        - Canonical persisted display_session metrics for downstream dashboards
         - Compression (CCR) statistics
         - Telemetry/TOIN (data flywheel) statistics
         - Cache and rate limiter stats
@@ -7430,6 +7490,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         cache_net_usd = prefix_cache_stats.get("totals", {}).get("net_savings_usd", 0.0)
         total_tokens_all_layers = compression_tokens + cli_tokens_avoided
         persistent_savings = m.savings_tracker.stats_preview()
+        display_session = persistent_savings.get("display_session", {})
 
         return {
             "summary": summary,
@@ -7505,6 +7566,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             else {},
             "waste_signals": dict(m.waste_signals_total) if m.waste_signals_total else {},
             "savings_history": m.savings_history[-100:],  # Last 100 data points
+            "display_session": display_session,
             "persistent_savings": persistent_savings,
             "prefix_cache": prefix_cache_stats,
             "cost": _merge_cost_stats(
@@ -7552,7 +7614,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         format: Literal["json", "csv"] = "json",
         series: Literal["history", "hourly", "daily", "weekly", "monthly"] = "history",
     ):
-        """Get durable proxy compression savings history for frontends."""
+        """Get durable proxy compression history plus display-session state."""
         if format == "csv":
             filename = f"headroom-stats-history-{series}.csv"
             return Response(
