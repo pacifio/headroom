@@ -433,7 +433,7 @@ def resolve_checkpoint_dir(
     recent_turns_per_session: int | None = None,
     cache_ttl_minutes: int = DEFAULT_CACHE_TTL_MINUTES,
 ) -> Path:
-    suffix_parts = ["v3", f"ttl_{cache_ttl_minutes}m"]
+    suffix_parts = ["v4", f"ttl_{cache_ttl_minutes}m"]
     if recent_turns_per_session:
         suffix_parts.append(f"recent_{recent_turns_per_session}")
     else:
@@ -646,20 +646,36 @@ def _apply_mode_to_messages(
     model: str,
     prefix_tracker: PrefixCacheTracker | None,
     comp_cache: CompressionCache | None,
+    previous_original_messages: list[dict[str, Any]] | None = None,
+    previous_forwarded_messages: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if mode == "baseline":
-        return copy.deepcopy(messages)
-    if mode == PROXY_MODE_CACHE:
         return copy.deepcopy(messages)
 
     assert proxy is not None
     assert prefix_tracker is not None
-    frozen_message_count = prefix_tracker.get_frozen_message_count()
     if mode == PROXY_MODE_CACHE:
-        frozen_message_count = AnthropicHandlerMixin._strict_previous_turn_frozen_count(
+        delta = AnthropicHandlerMixin._extract_cache_stable_delta(
             messages,
-            frozen_message_count,
+            previous_original_messages,
+            previous_forwarded_messages,
         )
+        if delta is None:
+            return copy.deepcopy(messages)
+        stable_forwarded_prefix, delta_messages = delta
+        if not delta_messages:
+            return stable_forwarded_prefix
+        context_limit = proxy.anthropic_provider.get_context_limit(model)
+        result = proxy.anthropic_pipeline.apply(
+            messages=delta_messages,
+            model=model,
+            model_limit=context_limit,
+            context=extract_user_query(delta_messages),
+            frozen_message_count=0,
+        )
+        return stable_forwarded_prefix + result.messages
+
+    frozen_message_count = prefix_tracker.get_frozen_message_count()
 
     working_messages = copy.deepcopy(messages)
     if proxy.config.image_optimize and working_messages and _messages_have_images(working_messages):
@@ -710,6 +726,7 @@ class _PendingTurn:
     turn: ReplayTurn
     tokenizer: Any
     raw_input_tokens: int
+    request_messages: list[dict[str, Any]]
     forwarded: list[dict[str, Any]]
 
 
@@ -912,6 +929,8 @@ def _simulate_single_replay_mode(
     conversation: list[dict[str, Any]] = []
     conversation_token_total = 0
     previous_forwarded: list[dict[str, Any]] = []
+    previous_original_context: list[dict[str, Any]] | None = None
+    previous_forwarded_context: list[dict[str, Any]] | None = None
     previous_timestamp: datetime | None = None
     prefix_tracker = None if mode == "baseline" else PrefixCacheTracker("anthropic")
     comp_cache = CompressionCache() if mode == PROXY_MODE_TOKEN else None
@@ -928,6 +947,8 @@ def _simulate_single_replay_mode(
             model=turn.model,
             prefix_tracker=prefix_tracker,
             comp_cache=comp_cache,
+            previous_original_messages=previous_original_context,
+            previous_forwarded_messages=previous_forwarded_context,
         )
         if pending is not None:
             _apply_turn_metrics(
@@ -952,6 +973,7 @@ def _simulate_single_replay_mode(
                 cache_write_tokens=0,
                 messages=forwarded,
                 message_token_counts=[tokenizer.count_message(msg) for msg in forwarded],
+                original_messages=conversation,
             )
 
         pending = _PendingTurn(
@@ -959,12 +981,17 @@ def _simulate_single_replay_mode(
             turn=turn,
             tokenizer=tokenizer,
             raw_input_tokens=raw_input_tokens,
+            request_messages=copy.deepcopy(conversation),
             forwarded=forwarded,
         )
         conversation.append(turn.assistant_message)
         conversation_token_total = raw_input_tokens + tokenizer.count_message(
             turn.assistant_message
         )
+        previous_original_context = copy.deepcopy(conversation)
+        previous_forwarded_context = copy.deepcopy(forwarded) + [
+            copy.deepcopy(turn.assistant_message)
+        ]
 
     if pending is not None:
         _apply_turn_metrics(

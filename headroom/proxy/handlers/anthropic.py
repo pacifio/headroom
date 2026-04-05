@@ -155,6 +155,43 @@ class AnthropicHandlerMixin:
                 changed += 1
         return restored, changed
 
+    @staticmethod
+    def _extract_cache_stable_delta(
+        current_messages: list[dict[str, Any]],
+        previous_original_messages: list[dict[str, Any]] | None,
+        previous_forwarded_messages: list[dict[str, Any]] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+        """Return (stable_forwarded_prefix, appended_delta_messages) when safe.
+
+        Safe means the prior original request is an exact message-prefix of the
+        current original request. This lets us replay the exact forwarded bytes
+        for historical context and only transform newly appended message suffixes.
+        """
+        if not previous_original_messages or previous_forwarded_messages is None:
+            return None
+        prefix_len = len(previous_original_messages)
+        if len(current_messages) < prefix_len:
+            return None
+        if current_messages[:prefix_len] != previous_original_messages:
+            return None
+        return (
+            copy.deepcopy(previous_forwarded_messages),
+            copy.deepcopy(current_messages[prefix_len:]),
+        )
+
+    @staticmethod
+    def _assistant_message_from_response_json(
+        resp_json: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not resp_json:
+            return None
+        if resp_json.get("role") != "assistant":
+            return None
+        return {
+            "role": "assistant",
+            "content": copy.deepcopy(resp_json.get("content", "")),
+        }
+
     async def handle_anthropic_messages(
         self,
         request: Request,
@@ -311,7 +348,7 @@ class AnthropicHandlerMixin:
 
         # Hook: pre_compress — let hooks modify messages before compression
 
-        if self.config.hooks:
+        if self.config.hooks and not is_cache_mode(self.config.mode):
             from headroom.hooks import CompressContext
 
             _hook_ctx = CompressContext(
@@ -323,6 +360,8 @@ class AnthropicHandlerMixin:
                 messages = self.config.hooks.pre_compress(messages, _hook_ctx)
             except Exception as e:
                 logger.debug(f"[{request_id}] pre_compress hook error: {e}")
+        else:
+            _hook_ctx = None
 
         # Apply optimization
         transforms_applied = []
@@ -373,7 +412,7 @@ class AnthropicHandlerMixin:
                 result = None
                 biases = (
                     self.config.hooks.compute_biases(messages, _hook_ctx)
-                    if self.config.hooks
+                    if self.config.hooks and _hook_ctx is not None
                     else None
                 )
 
@@ -436,8 +475,39 @@ class AnthropicHandlerMixin:
                         original_tokens = result.tokens_before
                         optimized_tokens = result.tokens_after
                 else:
-                    optimized_messages = messages
-                    optimized_tokens = original_tokens
+                    previous_original_messages = prefix_tracker.get_last_original_messages()
+                    previous_forwarded_messages = prefix_tracker.get_last_forwarded_messages()
+                    delta = self._extract_cache_stable_delta(
+                        original_client_messages,
+                        previous_original_messages,
+                        previous_forwarded_messages,
+                    )
+                    if delta is None:
+                        optimized_messages = messages
+                        optimized_tokens = original_tokens
+                    else:
+                        stable_forwarded_prefix, delta_messages = delta
+                        if delta_messages:
+                            result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    lambda: self.anthropic_pipeline.apply(
+                                        messages=delta_messages,
+                                        model=model,
+                                        model_limit=context_limit,
+                                        context=extract_user_query(delta_messages),
+                                        frozen_message_count=0,
+                                        biases=biases,
+                                    )
+                                ),
+                                timeout=COMPRESSION_TIMEOUT_SECONDS,
+                            )
+                            optimized_messages = stable_forwarded_prefix + result.messages
+                            transforms_applied = result.transforms_applied
+                            pipeline_timing = result.timing
+                            optimized_tokens = tokenizer.count_messages(optimized_messages)
+                        else:
+                            optimized_messages = stable_forwarded_prefix
+                            optimized_tokens = tokenizer.count_messages(optimized_messages)
 
                 if result and result.waste_signals:
                     waste_signals_dict = result.waste_signals.to_dict()
@@ -661,18 +731,6 @@ class AnthropicHandlerMixin:
         # Query Echo: disabled — hurts prefix caching in long conversations.
         # The echo changes every turn, invalidating the cached prefix.
         # To re-enable, uncomment and set query_echo_enabled on ProxyConfig.
-
-        if is_cache_mode(self.config.mode):
-            optimized_messages, restored_count = self._restore_frozen_prefix(
-                original_client_messages,
-                optimized_messages,
-                frozen_message_count=frozen_message_count,
-            )
-            if restored_count > 0:
-                logger.warning(
-                    f"[{request_id}] Restored {restored_count} frozen prefix message(s) "
-                    "to preserve cache stability"
-                )
 
         # Update body
         body["messages"] = optimized_messages
@@ -1049,10 +1107,17 @@ class AnthropicHandlerMixin:
                     uncached_input_tokens = usage.get("input_tokens", 0)
 
                 # Update prefix cache tracker for next turn
+                next_original_messages = copy.deepcopy(original_client_messages)
+                next_forwarded_messages = copy.deepcopy(optimized_messages)
+                assistant_message = self._assistant_message_from_response_json(resp_json)
+                if assistant_message is not None:
+                    next_original_messages.append(copy.deepcopy(assistant_message))
+                    next_forwarded_messages.append(copy.deepcopy(assistant_message))
                 prefix_tracker.update_from_response(
                     cache_read_tokens=cr_tokens,
                     cache_write_tokens=cw_tokens,
-                    messages=optimized_messages,
+                    messages=next_forwarded_messages,
+                    original_messages=next_original_messages,
                 )
 
                 if self.cost_tracker:

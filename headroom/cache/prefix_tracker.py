@@ -16,6 +16,7 @@ pipeline skips them entirely.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import time
@@ -88,6 +89,8 @@ class PrefixCacheTracker:
         self._cached_message_count: int = 0
         self._turn_number: int = 0
         self._last_activity: float = time.time()
+        self._last_original_messages: list[dict[str, Any]] = []
+        self._last_forwarded_messages: list[dict[str, Any]] = []
 
         # Stats
         self._busts_avoided: int = 0
@@ -113,6 +116,7 @@ class PrefixCacheTracker:
         cache_write_tokens: int,
         messages: list[dict[str, Any]],
         message_token_counts: list[int] | None = None,
+        original_messages: list[dict[str, Any]] | None = None,
     ) -> None:
         """Update tracker with cache metrics from the API response.
 
@@ -128,6 +132,8 @@ class PrefixCacheTracker:
         """
         self._last_activity = time.time()
         self._turn_number += 1
+        self._last_original_messages = copy.deepcopy(original_messages or messages)
+        self._last_forwarded_messages = copy.deepcopy(messages)
 
         # Compute total cached tokens (read + write = what's in cache now)
         total_cached = cache_read_tokens + cache_write_tokens
@@ -166,6 +172,12 @@ class PrefixCacheTracker:
             cache_read_tokens,
             cache_write_tokens,
         )
+
+    def get_last_original_messages(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self._last_original_messages)
+
+    def get_last_forwarded_messages(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self._last_forwarded_messages)
 
     def record_bust_avoided(self, tokens_preserved: int, compression_foregone: int) -> None:
         """Record when we chose to preserve cache over compressing."""

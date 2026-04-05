@@ -808,3 +808,92 @@ def test_cache_mode_does_not_forward_latest_turn_rewrites() -> None:
 
         assert response.status_code == 200
         assert captured["body"]["messages"] == original_messages
+
+
+def test_cache_mode_reuses_prior_forwarded_prefix_and_compresses_only_new_suffix() -> None:
+    captured = {"calls": []}
+    with _make_proxy_client() as client:
+        proxy = client.app.state.proxy
+        proxy.config.optimize = True
+        proxy.config.mode = "cache"
+        proxy.config.image_optimize = False
+
+        tracker = _FakePrefixTracker(frozen_count=0)
+        tracker._last_original_messages = [
+            {"role": "user", "content": "turn1"},
+            {"role": "assistant", "content": "turn1-assistant"},
+            {"role": "user", "content": "turn2"},
+            {"role": "assistant", "content": "turn2-assistant"},
+        ]
+        tracker._last_forwarded_messages = [
+            {"role": "user", "content": "turn1"},
+            {"role": "assistant", "content": "turn1-assistant"},
+            {"role": "user", "content": "COMPRESSED_TURN2"},
+            {"role": "assistant", "content": "turn2-assistant"},
+        ]
+        tracker.get_last_original_messages = lambda: tracker._last_original_messages.copy()
+        tracker.get_last_forwarded_messages = lambda: tracker._last_forwarded_messages.copy()
+
+        proxy.session_tracker_store.compute_session_id = lambda request, model, messages: (
+            "stable-session"
+        )
+        proxy.session_tracker_store.get_or_create = lambda session_id, provider: tracker
+
+        def _fake_apply(**kwargs):
+            captured["calls"].append(kwargs["messages"])
+            return SimpleNamespace(
+                messages=[{"role": "user", "content": "COMPRESSED_TURN3"}],
+                transforms_applied=["fake:delta"],
+                timing={},
+                tokens_before=40,
+                tokens_after=20,
+                waste_signals=None,
+            )
+
+        proxy.anthropic_pipeline.apply = _fake_apply
+
+        async def _fake_retry(method, url, headers, body, stream=False):  # noqa: ANN001
+            captured["body"] = body
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_cache_3",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {
+                        "input_tokens": 80,
+                        "output_tokens": 3,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            )
+
+        proxy._retry_request = _fake_retry
+
+        response = client.post(
+            "/v1/messages",
+            headers={"x-api-key": "test-key", "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 64,
+                "messages": [
+                    {"role": "user", "content": "turn1"},
+                    {"role": "assistant", "content": "turn1-assistant"},
+                    {"role": "user", "content": "turn2"},
+                    {"role": "assistant", "content": "turn2-assistant"},
+                    {"role": "user", "content": "turn3"},
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured["calls"] == [[{"role": "user", "content": "turn3"}]]
+        assert captured["body"]["messages"] == [
+            {"role": "user", "content": "turn1"},
+            {"role": "assistant", "content": "turn1-assistant"},
+            {"role": "user", "content": "COMPRESSED_TURN2"},
+            {"role": "assistant", "content": "turn2-assistant"},
+            {"role": "user", "content": "COMPRESSED_TURN3"},
+        ]
