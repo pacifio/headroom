@@ -906,7 +906,7 @@ def openclaw(
             )
 
     npm_bin = shutil.which("npm")
-    if not skip_build and not npm_bin:
+    if local_source_mode and not skip_build and not npm_bin:
         raise click.ClickException(
             "'npm' not found in PATH. Install Node/npm or rerun with --skip-build."
         )

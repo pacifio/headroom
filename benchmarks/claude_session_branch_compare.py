@@ -202,7 +202,7 @@ def _run_branch_benchmark(
     try:
         command = _build_benchmark_command(
             python_executable=args.python,
-            script_path=repo_root / "benchmarks" / "claude_session_mode_benchmark.py",
+            script_path=worktree_dir / "benchmarks" / "claude_session_mode_benchmark.py",
             root=args.root,
             output_dir=branch_output_dir,
             max_sessions=args.max_sessions,
@@ -213,7 +213,7 @@ def _run_branch_benchmark(
         )
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(
-            [str(worktree_dir), str(repo_root), env.get("PYTHONPATH", "")]
+            [str(worktree_dir), env.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
         subprocess.run(command, cwd=worktree_dir, check=True, env=env)
         return _load_branch_result(repo_root, ref, label, branch_output_dir)

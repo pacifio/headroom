@@ -1,5 +1,6 @@
 ARG PYTHON_VERSION=3.11
 ARG DISTROLESS_IMAGE=gcr.io/distroless/python3-debian13
+ARG PYTHON_SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/site-packages
 
 # ---- Build stage: compile native extensions, build wheel ----
 FROM python:${PYTHON_VERSION}-slim AS builder
@@ -31,12 +32,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:${PYTHON_VERSION}-slim AS runtime-slim-base
 
 ARG RUNTIME_USER=nonroot
+ARG PYTHON_SITE_PACKAGES
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder ${PYTHON_SITE_PACKAGES} ${PYTHON_SITE_PACKAGES}
 COPY --from=builder /usr/local/bin/headroom /usr/local/bin/headroom
 
 RUN mkdir -p /home/nonroot /data && \
@@ -64,8 +66,9 @@ CMD ["--host", "0.0.0.0", "--port", "8787"]
 FROM ${DISTROLESS_IMAGE} AS runtime-slim
 
 ARG RUNTIME_USER=nonroot
+ARG PYTHON_SITE_PACKAGES
 
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder ${PYTHON_SITE_PACKAGES} ${PYTHON_SITE_PACKAGES}
 
 USER ${RUNTIME_USER}
 WORKDIR /app
@@ -73,7 +76,7 @@ WORKDIR /app
 ENV HEADROOM_HOST=0.0.0.0 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/usr/local/lib/python3.11/site-packages
+    PYTHONPATH=${PYTHON_SITE_PACKAGES}
 
 EXPOSE 8787
 
