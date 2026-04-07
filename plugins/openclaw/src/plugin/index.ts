@@ -16,6 +16,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { HeadroomContextEngine } from "../engine.js";
+import {
+  applyGatewayProviderBaseUrls,
+  applyGatewayProviderBaseUrlsInPlace,
+  resolveGatewayProviderIds,
+} from "../gateway-config.js";
 import { normalizeAndValidateProxyUrl } from "../proxy-manager.js";
 import { createHeadroomRetrieveTool } from "../tools/headroom-retrieve.js";
 
@@ -34,6 +39,47 @@ export default function headroomPlugin(api: any) {
     error: (m: string) => logger.error(m),
     debug: (m: string) => logger.debug?.(m),
   });
+  const gatewayProviderIds = resolveGatewayProviderIds(config);
+
+  const ensureGatewayRouting = async () => {
+    if (gatewayProviderIds.length === 0) {
+      return;
+    }
+
+    try {
+      const activeProxyUrl = await engine.ensureProxyUrl();
+
+      applyGatewayProviderBaseUrlsInPlace(api.config, activeProxyUrl, gatewayProviderIds);
+
+      const currentConfig = api.runtime?.config?.loadConfig?.();
+      const writeConfigFile = api.runtime?.config?.writeConfigFile;
+      if (!currentConfig || typeof writeConfigFile !== "function") {
+        logger.info(
+          `[headroom] Upstream gateway routing active in memory for ${gatewayProviderIds.join(", ")} via ${activeProxyUrl}`,
+        );
+        return;
+      }
+
+      const { changed, config: nextConfig } = applyGatewayProviderBaseUrls(
+        currentConfig,
+        activeProxyUrl,
+        gatewayProviderIds,
+      );
+
+      if (changed) {
+        await writeConfigFile(nextConfig);
+        logger.info(
+          `[headroom] Routed ${gatewayProviderIds.join(", ")} through Headroom proxy at ${activeProxyUrl}`,
+        );
+      } else {
+        logger.info(
+          `[headroom] Upstream gateway already routed for ${gatewayProviderIds.join(", ")} at ${activeProxyUrl}`,
+        );
+      }
+    } catch (error) {
+      logger.warn(`[headroom] Failed to configure upstream gateway routing: ${error}`);
+    }
+  };
 
   // Register as context engine
   api.registerContextEngine("headroom", () => engine);
@@ -44,6 +90,12 @@ export default function headroomPlugin(api: any) {
     if (!activeProxyUrl) return null;
     return createHeadroomRetrieveTool({ proxyUrl: activeProxyUrl });
   });
+
+  api.on("gateway_start", async () => {
+    await ensureGatewayRouting();
+  });
+
+  void ensureGatewayRouting();
 
   logger.info("[headroom] Plugin registered");
 }

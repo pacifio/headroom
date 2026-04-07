@@ -13,6 +13,10 @@
     "pythonPath": {
       "label": "Python Path",
       "help": "Optional explicit python executable for python fallback launcher (for example: python, python3, py, or full path)."
+    },
+    "routeCodexViaProxy": {
+      "label": "Route OpenAI Codex Via Headroom",
+      "help": "When enabled, OpenClaw will use the active Headroom proxy as the upstream base URL for the built-in openai-codex provider so provider traffic flows through Headroom."
     }
   },
   "configSchema": {
@@ -44,6 +48,10 @@
         "minimum": 1000,
         "maximum": 120000,
         "default": 20000
+      },
+      "routeCodexViaProxy": {
+        "type": "boolean",
+        "default": true
       }
     }
   },

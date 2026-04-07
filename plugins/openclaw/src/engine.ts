@@ -237,4 +237,13 @@ export class HeadroomContextEngine {
   getProxyUrl(): string | null {
     return this.proxyUrl;
   }
+
+  async ensureProxyUrl(): Promise<string> {
+    if (this.proxyUrl) {
+      return this.proxyUrl;
+    }
+
+    this.proxyUrl = await this.proxyManager.start();
+    return this.proxyUrl;
+  }
 }
