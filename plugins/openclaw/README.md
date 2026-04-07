@@ -45,6 +45,8 @@ Why this matters:
 
 ## Configure
 
+Install automatically selects the `contextEngine` slot for `headroom` on current OpenClaw releases. If you need to switch back manually, set `plugins.slots.contextEngine` to `"legacy"` or another engine id.
+
 ```json
 {
   "plugins": {
