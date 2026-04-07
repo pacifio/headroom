@@ -40,14 +40,12 @@ export default function headroomPlugin(api: any) {
   });
   const gatewayProviderIds = resolveGatewayProviderIds(config);
 
-  const ensureGatewayRouting = async () => {
+  const applyGatewayRouting = async (activeProxyUrl: string) => {
     if (gatewayProviderIds.length === 0) {
       return;
     }
 
     try {
-      const activeProxyUrl = await engine.ensureProxyUrl();
-
       const changed = applyGatewayProviderBaseUrlsInPlace(api.config, activeProxyUrl, gatewayProviderIds);
 
       if (changed) {
@@ -63,6 +61,19 @@ export default function headroomPlugin(api: any) {
       logger.warn(`[headroom] Failed to configure upstream gateway routing: ${error}`);
     }
   };
+
+  const ensureGatewayRouting = async () => {
+    const activeProxyUrl = engine.getProxyUrl();
+    if (!activeProxyUrl) {
+      logger.debug?.("[headroom] Deferring upstream gateway routing until proxy is available");
+      return;
+    }
+    await applyGatewayRouting(activeProxyUrl);
+  };
+
+  engine.onProxyReady(async (activeProxyUrl) => {
+    await applyGatewayRouting(activeProxyUrl);
+  });
 
   // Register as context engine
   api.registerContextEngine("headroom", () => engine);

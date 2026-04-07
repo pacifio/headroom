@@ -27,6 +27,7 @@ export class HeadroomContextEngine {
   private proxyUrl: string | null = null;
   private config: HeadroomEngineConfig;
   private logger: ProxyManagerLogger;
+  private proxyReadyListeners = new Set<(proxyUrl: string) => void | Promise<void>>();
   private stats = {
     totalCompressions: 0,
     totalTokensSaved: 0,
@@ -53,6 +54,7 @@ export class HeadroomContextEngine {
 
     try {
       this.proxyUrl = await this.proxyManager.start();
+      await this.notifyProxyReady(this.proxyUrl);
       this.logger.info(`Engine bootstrapped (proxy: ${this.proxyUrl})`);
       return { bootstrapped: true };
     } catch (error) {
@@ -238,12 +240,26 @@ export class HeadroomContextEngine {
     return this.proxyUrl;
   }
 
+  onProxyReady(listener: (proxyUrl: string) => void | Promise<void>): () => void {
+    this.proxyReadyListeners.add(listener);
+    return () => {
+      this.proxyReadyListeners.delete(listener);
+    };
+  }
+
   async ensureProxyUrl(): Promise<string> {
     if (this.proxyUrl) {
       return this.proxyUrl;
     }
 
     this.proxyUrl = await this.proxyManager.start();
+    await this.notifyProxyReady(this.proxyUrl);
     return this.proxyUrl;
+  }
+
+  private async notifyProxyReady(proxyUrl: string): Promise<void> {
+    for (const listener of this.proxyReadyListeners) {
+      await listener(proxyUrl);
+    }
   }
 }
