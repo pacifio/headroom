@@ -145,8 +145,38 @@ Options:
   --project PATH    Project directory to analyze (default: current directory)
   --all             Analyze all discovered projects
   --apply           Write recommendations (default: dry-run)
-  --claude-dir PATH Path to .claude directory (default: ~/.claude)
+  --model TEXT      LLM model for analysis (default: auto-detected)
+  --agent TEXT      Which coding agent to analyze: auto, claude, codex, gemini
 ```
+
+## LLM Backend Selection
+
+`headroom learn` needs an LLM to analyze your sessions. It picks one automatically using this priority:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `--model` flag | `headroom learn --model gpt-4o` |
+| 2 | API key env var | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` |
+| 3 | `HEADROOM_LEARN_CLI` env var | `export HEADROOM_LEARN_CLI=gemini` |
+| 4 | Auto-detect installed CLIs | Checks PATH for `claude`, `gemini`, `codex` |
+
+### Using without an API key
+
+If you use Claude Code, Gemini CLI, or Codex via subscription (no raw API key), `headroom learn` can call them directly:
+
+```bash
+# Auto-detects claude in PATH — no API key needed
+headroom learn
+
+# Explicitly select a CLI backend
+headroom learn --model gemini-cli
+
+# Pin a CLI via environment variable
+export HEADROOM_LEARN_CLI=codex
+headroom learn
+```
+
+Valid values for `HEADROOM_LEARN_CLI`: `claude`, `gemini`, `codex`.
 
 ## Real-World Results
 
