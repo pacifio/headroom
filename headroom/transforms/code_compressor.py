@@ -989,9 +989,14 @@ class CodeAwareCompressor(Transform):
             # Verify syntax validity (checks both ERROR and MISSING nodes)
             syntax_valid = self._verify_syntax(compressed, detected_lang)
 
-            # If syntax invalid, fall back to original
+            # If syntax invalid, return original (never serve broken code)
             if not syntax_valid:
-                logger.warning("Compression produced invalid syntax, returning original")
+                logger.warning(
+                    "Code compression produced invalid syntax for %s (%d tokens), "
+                    "returning original",
+                    detected_lang.value,
+                    original_tokens,
+                )
                 return CodeCompressionResult(
                     compressed=code,
                     original=code,
@@ -1367,7 +1372,6 @@ class CodeAwareCompressor(Transform):
                     ds_node = first_child
 
             if ds_node is not None:
-                ds_text = _get_node_text(ds_node, code)
                 ds_lines_count = ds_node.end_point[0] - ds_node.start_point[0] + 1
                 ds_start_rel = ds_node.start_point[0] - body_node.start_point[0]
 
@@ -1377,44 +1381,110 @@ class CodeAwareCompressor(Transform):
                         body_lines[ds_start_rel : ds_start_rel + ds_lines_count]
                     )
                 elif self.config.docstring_mode == DocstringMode.FIRST_LINE:
-                    full_ds = ds_text.strip()
-                    ds_first_line_indent = (
-                        body_lines[ds_start_rel][
-                            : len(body_lines[ds_start_rel]) - len(body_lines[ds_start_rel].lstrip())
-                        ]
-                        if body_lines[ds_start_rel:]
-                        else ""
-                    )
-                    ds_stripped_lines = full_ds.split("\n")
-                    if len(ds_stripped_lines) == 1:
+                    # Use source lines directly (safe — preserves original quoting)
+                    if ds_lines_count == 1:
+                        # Single-line docstring: keep as-is
                         docstring_text = body_lines[ds_start_rel]
                     else:
-                        first_stripped = ds_stripped_lines[0].strip()
-                        if first_stripped in ('"""', "'''", 'r"""', "r'''"):
-                            # Opening quote on its own line
-                            if len(ds_stripped_lines) > 1:
-                                docstring_text = (
-                                    ds_first_line_indent
-                                    + '"""'
-                                    + ds_stripped_lines[1].strip()
-                                    + '"""'
-                                )
-                        elif first_stripped.endswith('"""'):
-                            # Single-line docstring: """text"""
-                            docstring_text = body_lines[ds_start_rel]
+                        # Multi-line docstring: keep first line, close it properly
+                        first_ds_line = body_lines[ds_start_rel]
+                        ds_indent = first_ds_line[
+                            : len(first_ds_line) - len(first_ds_line.lstrip())
+                        ]
+                        stripped = first_ds_line.strip()
+
+                        # Detect quote style from source
+                        quote = '"""'
+                        for q in ('r"""', "r'''", '"""', "'''"):
+                            if stripped.startswith(q):
+                                quote = q[-3:]
+                                break
+
+                        # Find where content starts (after opening quotes + prefix)
+                        content_start = 0
+                        for opener in ('r"""', "r'''", '"""', "'''"):
+                            if stripped.startswith(opener):
+                                content_start = len(opener)
+                                break
+                        first_content = stripped[content_start:].strip()
+
+                        # Remove trailing closing quotes if the first line has them
+                        for q in ('"""', "'''"):
+                            if first_content.endswith(q):
+                                first_content = first_content[: -len(q)].strip()
+
+                        if first_content:
+                            # """Some text here\n...\n"""  →  """Some text here"""
+                            prefix_part = stripped[:content_start]
+                            docstring_text = f"{ds_indent}{prefix_part}{first_content}{quote}"
                         else:
-                            # Multi-line: """text\n...\n"""  → """text..."""
-                            docstring_text = ds_first_line_indent + first_stripped + '..."""'
+                            # Opening quote on its own line: """\n  text\n"""
+                            if ds_start_rel + 1 < len(body_lines):
+                                second_line = body_lines[ds_start_rel + 1].strip()
+                                for q in ('"""', "'''"):
+                                    if second_line.endswith(q):
+                                        second_line = second_line[: -len(q)].strip()
+                                if second_line:
+                                    docstring_text = f"{ds_indent}{quote}{second_line}{quote}"
+                                else:
+                                    docstring_text = first_ds_line
+                            else:
+                                docstring_text = first_ds_line
                 # elif REMOVE: docstring_text stays empty
                 ds_skip_lines = ds_start_rel + ds_lines_count
 
-        # Get content lines after docstring
-        content_lines = body_lines[ds_skip_lines:]
-        total_body = len(content_lines)
-        keep_lines = min(body_limit, total_body)
+        # --- Statement-based body truncation (never cuts mid-expression) ---
+        #
+        # Walk body_node.children (AST statements) instead of slicing lines.
+        # Each child is a complete, syntactically valid statement. We keep
+        # whole statements until the line budget is exhausted, so the output
+        # always parses correctly.
 
         # Detect indentation from actual body code (preserves whatever the file uses)
         indent = _detect_indent(body_lines) if body_lines else "    "
+
+        # Collect non-docstring body statements from the AST
+        body_stmts: list[tuple[int, int]] = []  # (start_row, end_row) absolute
+        ds_end_row = -1
+        if ds_skip_lines > 0 and body_node.child_count > 0:
+            # The docstring node occupies the first ds_skip_lines lines
+            ds_end_row = body_node.start_point[0] + ds_skip_lines - 1
+
+        # Punctuation tokens to skip (brace-language body delimiters, semicolons)
+        _SKIP_TYPES = frozenset({"{", "}", ";", ",", "comment", "line_comment", "block_comment"})
+
+        for child in body_node.children:
+            # Skip docstring node (already handled separately)
+            if child.start_point[0] <= ds_end_row:
+                continue
+            # Skip punctuation and comment nodes
+            if child.type in _SKIP_TYPES:
+                continue
+            # Skip unnamed tokens (tree-sitter anonymous nodes like braces)
+            if not child.is_named:
+                continue
+            body_stmts.append((child.start_point[0], child.end_point[0]))
+
+        # Calculate lines per statement and keep whole statements until budget
+        kept_lines: list[str] = []
+        kept_line_count = 0
+        stmts_kept = 0
+        total_body_lines_count = sum(end - start + 1 for start, end in body_stmts)
+
+        for start_row, end_row in body_stmts:
+            stmt_lines = code_lines[start_row : end_row + 1]
+            stmt_line_count = len(stmt_lines)
+
+            # If adding this statement would exceed budget and we already have
+            # at least one statement, stop here
+            if kept_line_count + stmt_line_count > body_limit and stmts_kept > 0:
+                break
+
+            kept_lines.extend(stmt_lines)
+            kept_line_count += stmt_line_count
+            stmts_kept += 1
+
+        omitted_lines = total_body_lines_count - kept_line_count
 
         # Build compressed output preserving original indentation
         result_parts: list[str] = []
@@ -1423,7 +1493,6 @@ class CodeAwareCompressor(Transform):
         if signature_lines:
             result_parts.extend(signature_lines)
         else:
-            # Single-line: signature and body on same line — extract up to colon/brace
             sig_text = code[node.start_byte : body_node.start_byte].rstrip()
             result_parts.append(sig_text)
 
@@ -1436,14 +1505,13 @@ class CodeAwareCompressor(Transform):
         ):
             result_parts.append(docstring_text)
 
-        if keep_lines > 0:
-            result_parts.extend(content_lines[:keep_lines])
+        if kept_lines:
+            result_parts.extend(kept_lines)
 
-        if total_body > keep_lines:
-            omitted = total_body - keep_lines
+        if omitted_lines > 0:
             result_parts.append(
                 _make_omitted_comment(
-                    func_name, omitted, indent, lang_config.comment_prefix, analysis
+                    func_name, omitted_lines, indent, lang_config.comment_prefix, analysis
                 )
             )
             if lang_config.uses_colon_after_signature:
