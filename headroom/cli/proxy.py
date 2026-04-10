@@ -339,7 +339,7 @@ Memory (Multi-Provider):
     if is_telemetry_enabled():
         telemetry_line = (
             "  Telemetry:    ENABLED (anonymous aggregate stats)\n"
-            "                Disable: HEADROOM_TELEMETRY=off  or  headroom proxy --no-telemetry"
+            "                Disable: HEADROOM_TELEMETRY=off or headroom proxy --no-telemetry"
         )
     else:
         telemetry_line = "  Telemetry:    DISABLED"
