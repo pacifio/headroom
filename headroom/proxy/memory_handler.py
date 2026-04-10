@@ -24,9 +24,11 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -90,8 +92,13 @@ class MemoryHandler:
     - Native tool: Anthropic's memory_20250818 built-in tool (experimental)
     """
 
-    def __init__(self, config: MemoryConfig) -> None:
+    # Cosine similarity thresholds for dedup
+    DEDUP_AUTO_THRESHOLD = 0.92  # Auto-supersede (same fact, different wording)
+    DEDUP_HINT_THRESHOLD = 0.75  # Suggest merge to LLM (related, possibly duplicate)
+
+    def __init__(self, config: MemoryConfig, agent_type: str = "unknown") -> None:
         self.config = config
+        self.agent_type = agent_type
         self._backend: LocalBackend | Any = None
         self._initialized = False
         self._memory_tools: list[dict[str, Any]] | None = None
@@ -494,7 +501,9 @@ Use this context to provide personalized and contextually relevant responses."""
                 await self._ensure_initialized()
                 if not self._backend:
                     continue
-                result_content = await self._execute_memory_tool(tool_name, input_data, user_id)
+                result_content = await self._execute_memory_tool(
+                    tool_name, input_data, user_id, provider
+                )
             else:
                 continue
 
@@ -525,15 +534,16 @@ Use this context to provide personalized and contextually relevant responses."""
         tool_name: str,
         input_data: dict[str, Any],
         user_id: str,
+        provider: str = "anthropic",
     ) -> str:
         """Execute a memory tool and return result string."""
         try:
             if tool_name == "memory_save":
-                return await self._execute_save(input_data, user_id)
+                return await self._execute_save(input_data, user_id, provider)
             elif tool_name == "memory_search":
                 return await self._execute_search(input_data, user_id)
             elif tool_name == "memory_update":
-                return await self._execute_update(input_data, user_id)
+                return await self._execute_update(input_data, user_id, provider)
             elif tool_name == "memory_delete":
                 return await self._execute_delete(input_data, user_id)
             else:
@@ -543,8 +553,10 @@ Use this context to provide personalized and contextually relevant responses."""
             logger.error(f"Memory: Tool {tool_name} failed: {e}")
             return json.dumps({"status": "error", "error": str(e)})
 
-    async def _execute_save(self, input_data: dict[str, Any], user_id: str) -> str:
-        """Execute memory_save tool."""
+    async def _execute_save(
+        self, input_data: dict[str, Any], user_id: str, provider: str = "anthropic"
+    ) -> str:
+        """Execute memory_save tool with provenance, dedup hints, and async background dedup."""
         content = input_data.get("content", "")
         if not content:
             return json.dumps({"status": "error", "error": "content is required"})
@@ -557,7 +569,15 @@ Use this context to provide personalized and contextually relevant responses."""
         relationships = input_data.get("relationships")
         extracted_relationships = input_data.get("extracted_relationships")
 
-        # Call backend
+        # Agent provenance metadata
+        provenance_metadata = {
+            "source_agent": self.agent_type,
+            "source_provider": provider,
+            "created_via": "tool_call",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Save to backend
         memory = await self._backend.save_memory(
             content=content,
             user_id=user_id,
@@ -567,17 +587,93 @@ Use this context to provide personalized and contextually relevant responses."""
             extracted_entities=extracted_entities,
             relationships=relationships,
             extracted_relationships=extracted_relationships,
+            metadata=provenance_metadata,
         )
 
-        return json.dumps(
-            {
-                "status": "saved",
-                "memory_id": memory.id,
-                "content": (
-                    memory.content[:100] + "..." if len(memory.content) > 100 else memory.content
-                ),
-            }
+        # Search for similar existing memories (for hints + async dedup)
+        similar_memories = []
+        try:
+            results = await self._backend.search_memories(
+                query=content,
+                user_id=user_id,
+                top_k=5,
+            )
+            # Exclude the memory we just saved
+            similar_memories = [r for r in results if r.memory.id != memory.id]
+        except Exception as e:
+            logger.debug(f"Memory: Similar search failed during save: {e}")
+
+        # Build response with dedup hints for the LLM
+        result: dict[str, Any] = {
+            "status": "saved",
+            "memory_id": memory.id,
+            "content": memory.content[:100] + "..."
+            if len(memory.content) > 100
+            else memory.content,
+        }
+
+        # Enriched hint: if similar memory exists, suggest merge to the LLM
+        if similar_memories and similar_memories[0].score >= self.DEDUP_HINT_THRESHOLD:
+            top = similar_memories[0]
+            source_info = ""
+            src = top.memory.metadata.get("source_agent", "")
+            if src:
+                source_info = f", saved by {src}"
+            result["note"] = (
+                f"Similar memory exists (id: {top.memory.id}, "
+                f"{top.score:.0%} match{source_info}): "
+                f"'{top.memory.content[:120]}'. "
+                f"Call memory_update('{top.memory.id}', '<merged content>') to consolidate, "
+                f"or ignore if these are distinct facts."
+            )
+
+        # Async background dedup: auto-supersede obvious duplicates
+        if similar_memories:
+            asyncio.create_task(self._background_dedup(memory.id, similar_memories, user_id))
+
+        logger.info(
+            f"Memory: Saved '{content[:60]}' for user {user_id} "
+            f"(agent={self.agent_type}, provider={provider}, "
+            f"similar={len(similar_memories)})"
         )
+
+        return json.dumps(result)
+
+    async def _background_dedup(
+        self,
+        new_memory_id: str,
+        similar_results: list[Any],
+        user_id: str,
+    ) -> None:
+        """Auto-supersede obvious duplicates in background (fire-and-forget).
+
+        If an existing memory has >0.92 cosine similarity to the new one,
+        mark the older one as superseded. This runs asynchronously and
+        never blocks the tool response.
+        """
+        try:
+            for result in similar_results:
+                if result.score < self.DEDUP_AUTO_THRESHOLD:
+                    continue
+                if result.memory.id == new_memory_id:
+                    continue
+
+                old = result.memory
+                # Skip if already superseded
+                if old.metadata.get("superseded_by"):
+                    continue
+
+                # Mark old memory as superseded by deleting it
+                # (update_memory creates a new version — for dedup we just remove the duplicate)
+                if hasattr(self._backend, "delete_memory"):
+                    await self._backend.delete_memory(old.id)
+                    logger.info(
+                        f"Memory dedup: removed '{old.content[:50]}' "
+                        f"(superseded by {new_memory_id}, {result.score:.2f} cosine, "
+                        f"agent={old.metadata.get('source_agent', '?')})"
+                    )
+        except Exception as e:
+            logger.warning(f"Memory background dedup failed: {e}")
 
     async def _execute_search(self, input_data: dict[str, Any], user_id: str) -> str:
         """Execute memory_search tool."""
@@ -617,8 +713,10 @@ Use this context to provide personalized and contextually relevant responses."""
             }
         )
 
-    async def _execute_update(self, input_data: dict[str, Any], user_id: str) -> str:
-        """Execute memory_update tool."""
+    async def _execute_update(
+        self, input_data: dict[str, Any], user_id: str, provider: str = "anthropic"
+    ) -> str:
+        """Execute memory_update tool with edit history tracking."""
         memory_id = input_data.get("memory_id", "")
         new_content = input_data.get("new_content", "")
 
@@ -629,13 +727,37 @@ Use this context to provide personalized and contextually relevant responses."""
 
         reason = input_data.get("reason")
 
+        # Build edit history entry
+        edit_entry = {
+            "agent": self.agent_type,
+            "provider": provider,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+        }
+
         # Check if backend has update_memory method
         if hasattr(self._backend, "update_memory"):
+            # Try to get old memory for history
+            old_content = ""
+            try:
+                old_results = await self._backend.search_memories(
+                    query=memory_id, user_id=user_id, top_k=1
+                )
+                if old_results:
+                    old_content = old_results[0].memory.content[:200]
+                    edit_entry["previous_content"] = old_content
+            except Exception:
+                pass
+
             memory = await self._backend.update_memory(
                 memory_id=memory_id,
                 new_content=new_content,
-                reason=reason,
+                reason=f"Updated by {self.agent_type} via {provider}: {reason or 'no reason'}",
                 user_id=user_id,
+            )
+            logger.info(
+                f"Memory: Updated {memory_id} by {self.agent_type} "
+                f"(provider={provider}, reason={reason})"
             )
             return json.dumps({"status": "updated", "memory_id": memory.id})
         else:
@@ -645,6 +767,12 @@ Use this context to provide personalized and contextually relevant responses."""
                 content=new_content,
                 user_id=user_id,
                 importance=0.5,
+                metadata={
+                    "source_agent": self.agent_type,
+                    "source_provider": provider,
+                    "created_via": "tool_call_update_fallback",
+                    "supersedes_id": memory_id,
+                },
             )
             return json.dumps(
                 {

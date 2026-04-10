@@ -450,7 +450,10 @@ class HeadroomProxy(
                 bridge_auto_import=config.memory_bridge_auto_import,
                 bridge_export_path=config.memory_bridge_export_path,
             )
-            self.memory_handler = MemoryHandler(memory_config)
+            self.memory_handler = MemoryHandler(
+                memory_config,
+                agent_type=config.traffic_learning_agent_type,
+            )
 
         # Usage Reporter (license validation + phone-home for managed/enterprise)
         self.usage_reporter: UsageReporter | None = None
