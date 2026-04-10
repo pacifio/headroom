@@ -175,7 +175,7 @@ class GeminiHandlerMixin:
             rate_key = headers.get("x-goog-api-key", "default")[:20]
             allowed, wait_seconds = await self.rate_limiter.check_request(rate_key)
             if not allowed:
-                await self.metrics.record_rate_limited()
+                await self.metrics.record_rate_limited(provider="gemini")
                 raise HTTPException(
                     status_code=429,
                     detail=f"Rate limited. Retry after {wait_seconds:.1f}s",
@@ -406,7 +406,7 @@ class GeminiHandlerMixin:
                     headers=response_headers,
                 )
         except Exception as e:
-            await self.metrics.record_failed()
+            await self.metrics.record_failed(provider="gemini")
             logger.error(f"[{request_id}] Gemini request failed: {type(e).__name__}: {e}")
             return JSONResponse(
                 status_code=502,
@@ -650,7 +650,7 @@ class GeminiHandlerMixin:
                 headers=response_headers,
             )
         except Exception as e:
-            await self.metrics.record_failed()
+            await self.metrics.record_failed(provider="gemini")
             logger.error(f"[{request_id}] Gemini countTokens failed: {type(e).__name__}: {e}")
             return JSONResponse(
                 status_code=502,

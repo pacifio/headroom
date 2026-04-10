@@ -810,7 +810,7 @@ class BatchHandlerMixin:
 
         except Exception as e:
             logger.error(f"[{request_id}] Batch creation failed: {type(e).__name__}: {e}")
-            await self.metrics.record_failed()
+            await self.metrics.record_failed(provider="batch")
             return JSONResponse(
                 status_code=500,
                 content={

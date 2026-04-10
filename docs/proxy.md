@@ -21,7 +21,29 @@ headroom proxy \
   --budget 100.0
 ```
 
-Telemetry is enabled by default. Opt out with `HEADROOM_TELEMETRY=off` or `headroom proxy --no-telemetry`. Downstream apps can set `HEADROOM_SDK=headroom-app` to override the anonymous telemetry `sdk` label; the default remains `proxy`.
+Anonymous aggregate telemetry is enabled by default. Opt out with `HEADROOM_TELEMETRY=off` or `headroom proxy --no-telemetry`. Downstream apps can set `HEADROOM_SDK=headroom-app` to override the anonymous telemetry `sdk` label; the default remains `proxy`.
+
+Operational OTEL metrics are configured separately and are **off by default**. Install `headroom-ai[proxy,otel]` and set:
+
+```bash
+HEADROOM_OTEL_METRICS_ENABLED=1
+HEADROOM_OTEL_METRICS_EXPORTER=otlp_http
+HEADROOM_OTEL_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics
+HEADROOM_OTEL_SERVICE_NAME=headroom-proxy
+```
+
+Use `HEADROOM_OTEL_METRICS_EXPORTER=console` for local smoke testing. `HEADROOM_TELEMETRY` controls the anonymous data-flywheel beacon only; it does not disable or enable OTEL export.
+
+Langfuse can be enabled alongside this OTEL path for **trace ingestion**. Langfuse does **not** ingest OTEL metrics, so Headroom keeps metrics and Langfuse traces as complementary signals:
+
+```bash
+HEADROOM_LANGFUSE_ENABLED=1
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+When configured, Headroom emits OTLP traces for the shared compression pipeline to Langfuse while continuing to expose metrics through `/metrics` and OTEL metric exporters.
 
 ## Command Line Options
 
@@ -173,6 +195,8 @@ curl "http://localhost:8787/stats-history?format=csv&series=monthly"
 ```bash
 curl http://localhost:8787/metrics
 ```
+
+`/metrics` remains the built-in Prometheus-formatted operational view. The proxy now also emits the same operational events through the OTEL facade when OTEL metrics are configured.
 
 ### LLM APIs
 

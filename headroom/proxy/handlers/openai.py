@@ -213,7 +213,7 @@ class OpenAIHandlerMixin:
             rate_key = headers.get("authorization", "default")[:20]
             allowed, wait_seconds = await self.rate_limiter.check_request(rate_key)
             if not allowed:
-                await self.metrics.record_rate_limited()
+                await self.metrics.record_rate_limited(provider="openai")
                 raise HTTPException(
                     status_code=429,
                     detail=f"Rate limited. Retry after {wait_seconds:.1f}s",
@@ -689,7 +689,7 @@ class OpenAIHandlerMixin:
                     headers=response_headers,
                 )
         except Exception as e:
-            await self.metrics.record_failed()
+            await self.metrics.record_failed(provider="openai")
             # Log full error details internally for debugging
             logger.error(f"[{request_id}] OpenAI request failed: {type(e).__name__}: {e}")
             # Return sanitized error message to client (don't expose internal details)
@@ -800,7 +800,7 @@ class OpenAIHandlerMixin:
             rate_key = headers.get("authorization", "default")[:20]
             allowed, wait_seconds = await self.rate_limiter.check_request(rate_key)
             if not allowed:
-                await self.metrics.record_rate_limited()
+                await self.metrics.record_rate_limited(provider="openai")
                 raise HTTPException(
                     status_code=429,
                     detail=f"Rate limited. Retry after {wait_seconds:.1f}s",
@@ -950,7 +950,7 @@ class OpenAIHandlerMixin:
                     headers=response_headers,
                 )
         except Exception as e:
-            await self.metrics.record_failed()
+            await self.metrics.record_failed(provider="openai")
             logger.error(f"[{request_id}] OpenAI responses request failed: {type(e).__name__}: {e}")
             return JSONResponse(
                 status_code=502,

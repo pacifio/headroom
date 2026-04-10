@@ -145,27 +145,112 @@ curl http://localhost:8787/metrics
 ```
 
 ```prometheus
-# HELP headroom_requests_total Total requests processed
-headroom_requests_total{mode="optimize"} 1234
+# HELP headroom_requests_total Total number of requests
+headroom_requests_total 1234
 
-# HELP headroom_tokens_saved_total Total tokens saved
+# HELP headroom_latency_ms_count Count of observed request latencies
+headroom_latency_ms_count 1234
+
+# HELP headroom_tokens_saved_total Tokens saved by optimization
 headroom_tokens_saved_total 5678900
 
-# HELP headroom_compression_ratio Compression ratio histogram
-headroom_compression_ratio_bucket{le="0.5"} 890
-headroom_compression_ratio_bucket{le="0.7"} 1100
-headroom_compression_ratio_bucket{le="0.9"} 1200
+# HELP headroom_requests_by_provider Requests by provider
+headroom_requests_by_provider{provider="anthropic"} 800
+headroom_requests_by_provider{provider="openai"} 434
 
-# HELP headroom_latency_seconds Request latency histogram
-headroom_latency_seconds_bucket{le="0.01"} 800
-headroom_latency_seconds_bucket{le="0.1"} 1150
+# HELP headroom_transform_timing_ms_sum Sum of transform timing in milliseconds
+headroom_transform_timing_ms_sum{transform="router"} 5123.7
 
-# HELP headroom_cache_hits_total Cache hit counter
-headroom_cache_hits_total 456
-
-# HELP headroom_cache_misses_total Cache miss counter
-headroom_cache_misses_total 778
+# HELP headroom_cache_write_ttl_tokens_total Provider cache write tokens by observed TTL bucket
+headroom_cache_write_ttl_tokens_total{provider="anthropic",ttl="5m"} 20000
+headroom_cache_write_ttl_tokens_total{provider="anthropic",ttl="1h"} 50000
 ```
+
+The built-in Prometheus endpoint exposes the proxy's in-memory operational state, including:
+
+- request counters
+- token totals and savings
+- latency / overhead / TTFB summaries
+- per-provider and per-model request counts
+- per-stage pipeline timing
+- waste signal token totals
+- provider cache read/write and TTL-bucket counters
+- cache bust counters
+
+### OTEL Metrics
+
+Headroom now emits the same operational events through a shared OTEL metrics facade.
+
+There are two integration modes:
+
+1. **Ambient OTEL app setup** - if your application already configures a global OTEL meter provider, Headroom records into that provider automatically.
+2. **Headroom-managed export** - if you want the proxy to configure its own OTEL metrics exporter, install:
+
+```bash
+pip install "headroom-ai[proxy,otel]"
+```
+
+Then set:
+
+```bash
+HEADROOM_OTEL_METRICS_ENABLED=1
+HEADROOM_OTEL_METRICS_EXPORTER=otlp_http
+HEADROOM_OTEL_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics
+HEADROOM_OTEL_SERVICE_NAME=headroom-proxy
+HEADROOM_OTEL_RESOURCE_ATTRIBUTES=deployment.environment=dev,service.namespace=headroom
+```
+
+For local validation without a collector:
+
+```bash
+HEADROOM_OTEL_METRICS_ENABLED=1
+HEADROOM_OTEL_METRICS_EXPORTER=console
+headroom proxy
+```
+
+The proxy's `/stats` response now includes an `otel` block that reports whether Headroom is managing an OTEL exporter for the current process.
+
+Headroom's managed OTEL exporters are intentionally scoped to Headroom's own instrumentation. If you already manage global OTEL providers in your app, keep using those and let Headroom record into the ambient providers instead of enabling `HEADROOM_OTEL_*`.
+
+### OTEL Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HEADROOM_OTEL_METRICS_ENABLED` | `0` | Enables Headroom-managed OTEL metric export |
+| `HEADROOM_OTEL_METRICS_EXPORTER` | `otlp_http` | Exporter type: `otlp_http` or `console` |
+| `HEADROOM_OTEL_METRICS_ENDPOINT` | unset | OTLP HTTP metrics endpoint |
+| `HEADROOM_OTEL_METRICS_HEADERS` | unset | Comma-separated `key=value` headers for OTLP export |
+| `HEADROOM_OTEL_METRICS_EXPORT_INTERVAL_MS` | `10000` | Periodic export interval in milliseconds |
+| `HEADROOM_OTEL_SERVICE_NAME` | `headroom-proxy` in proxy mode | OTEL `service.name` |
+| `HEADROOM_OTEL_RESOURCE_ATTRIBUTES` | unset | Comma-separated resource attributes |
+
+### Anonymous Telemetry vs OTEL
+
+Headroom has two separate systems:
+
+- `HEADROOM_TELEMETRY` / `--no-telemetry` controls the privacy-preserving anonymous data-flywheel beacon and TOIN-related aggregate reporting.
+- `HEADROOM_OTEL_*` controls operational OTEL metric export.
+
+They are independent by design so you can disable the anonymous beacon while keeping OTEL metrics enabled, or vice versa.
+
+### Langfuse
+
+Langfuse fits next to this implementation as a **trace backend**, not as a metrics backend.
+
+- Headroom metrics continue to go to `/metrics` and/or your OTEL metrics exporter.
+- Langfuse receives OTLP traces for Headroom's compression pipeline.
+- Headroom's `/stats` response includes a `langfuse` block when Headroom is managing Langfuse trace export for the process.
+
+Enable it with:
+
+```bash
+HEADROOM_LANGFUSE_ENABLED=1
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+For self-hosted Langfuse, set `LANGFUSE_BASE_URL` to your instance URL.
 
 ### Health Check
 
@@ -293,19 +378,19 @@ Example Grafana dashboard configuration for Prometheus metrics:
       "targets": [{"expr": "headroom_tokens_saved_total"}]
     },
     {
-      "title": "Compression Ratio",
+      "title": "Average Request Latency (ms)",
       "type": "gauge",
-      "targets": [{"expr": "histogram_quantile(0.5, headroom_compression_ratio_bucket)"}]
+      "targets": [{"expr": "headroom_latency_ms_sum / clamp_min(headroom_latency_ms_count, 1)"}]
     },
     {
-      "title": "Request Latency (p99)",
+      "title": "Max Request Latency (ms)",
       "type": "graph",
-      "targets": [{"expr": "histogram_quantile(0.99, headroom_latency_seconds_bucket)"}]
+      "targets": [{"expr": "headroom_latency_ms_max"}]
     },
     {
-      "title": "Cache Hit Rate",
+      "title": "Provider Cache Hit Rate",
       "type": "gauge",
-      "targets": [{"expr": "headroom_cache_hits_total / (headroom_cache_hits_total + headroom_cache_misses_total)"}]
+      "targets": [{"expr": "headroom_provider_cache_hit_requests_total / clamp_min(headroom_provider_cache_requests_total, 1)"}]
     }
   ]
 }

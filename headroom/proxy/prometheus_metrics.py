@@ -16,11 +16,46 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from headroom.observability import HeadroomOtelMetrics
     from headroom.proxy.cost import CostTracker
 
+from headroom.observability import get_otel_metrics
 from headroom.proxy.savings_tracker import SavingsTracker
 
 logger = logging.getLogger("headroom.proxy")
+
+
+def _escape_label_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _format_labels(labels: dict[str, str] | None = None) -> str:
+    if not labels:
+        return ""
+
+    rendered = ",".join(
+        f'{key}="{_escape_label_value(str(value))}"' for key, value in sorted(labels.items())
+    )
+    return f"{{{rendered}}}"
+
+
+def _append_metric(
+    lines: list[str],
+    *,
+    name: str,
+    metric_type: str,
+    help_text: str,
+    value: int | float,
+    labels: dict[str, str] | None = None,
+) -> None:
+    lines.extend(
+        [
+            f"# HELP {name} {help_text}",
+            f"# TYPE {name} {metric_type}",
+            f"{name}{_format_labels(labels)} {value}",
+            "",
+        ]
+    )
 
 
 class PrometheusMetrics:
@@ -30,6 +65,7 @@ class PrometheusMetrics:
         self,
         savings_tracker: SavingsTracker | None = None,
         cost_tracker: CostTracker | None = None,
+        otel_metrics: HeadroomOtelMetrics | None = None,
     ):
         self.requests_total = 0
         self.requests_by_provider: dict[str, int] = defaultdict(int)
@@ -115,6 +151,10 @@ class PrometheusMetrics:
         )
 
         self._lock = asyncio.Lock()
+        self._otel_metrics = otel_metrics
+
+    def _get_otel_metrics(self) -> HeadroomOtelMetrics:
+        return self._otel_metrics or get_otel_metrics()
 
     def _current_savings_tracker_totals(self) -> tuple[int, float]:
         total_input_tokens = self._savings_tracker_input_tokens_offset + self.tokens_input_total
@@ -260,77 +300,365 @@ class PrometheusMetrics:
                 total_input_cost_usd=total_input_cost_usd,
             )
 
+        self._get_otel_metrics().record_proxy_request(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            tokens_saved=tokens_saved,
+            latency_ms=latency_ms,
+            cached=cached,
+            overhead_ms=overhead_ms,
+            ttfb_ms=ttfb_ms,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cache_write_5m_tokens=cache_write_5m_tokens,
+            cache_write_1h_tokens=cache_write_1h_tokens,
+            uncached_input_tokens=uncached_input_tokens,
+        )
+
     async def record_cache_bust(self, tokens_lost: int) -> None:
         """Record tokens that lost their cache discount due to compression."""
         async with self._lock:
             self.cache_bust_tokens_lost += tokens_lost
             self.cache_bust_count += 1
+        self._get_otel_metrics().record_proxy_cache_bust(tokens_lost=tokens_lost)
 
-    async def record_rate_limited(self):
+    async def record_rate_limited(self, *, provider: str | None = None, model: str | None = None):
         async with self._lock:
             self.requests_rate_limited += 1
+        self._get_otel_metrics().record_proxy_rate_limited(provider=provider, model=model)
 
-    async def record_failed(self):
+    async def record_failed(self, *, provider: str | None = None, model: str | None = None):
         async with self._lock:
             self.requests_failed += 1
+        self._get_otel_metrics().record_proxy_failed(provider=provider, model=model)
 
     async def export(self) -> str:
         """Export metrics in Prometheus format."""
         async with self._lock:
-            lines = [
-                "# HELP headroom_requests_total Total number of requests",
-                "# TYPE headroom_requests_total counter",
-                f"headroom_requests_total {self.requests_total}",
-                "",
-                "# HELP headroom_requests_cached_total Cached request count",
-                "# TYPE headroom_requests_cached_total counter",
-                f"headroom_requests_cached_total {self.requests_cached}",
-                "",
-                "# HELP headroom_requests_rate_limited_total Rate limited requests",
-                "# TYPE headroom_requests_rate_limited_total counter",
-                f"headroom_requests_rate_limited_total {self.requests_rate_limited}",
-                "",
-                "# HELP headroom_requests_failed_total Failed requests",
-                "# TYPE headroom_requests_failed_total counter",
-                f"headroom_requests_failed_total {self.requests_failed}",
-                "",
-                "# HELP headroom_tokens_input_total Total input tokens",
-                "# TYPE headroom_tokens_input_total counter",
-                f"headroom_tokens_input_total {self.tokens_input_total}",
-                "",
-                "# HELP headroom_tokens_output_total Total output tokens",
-                "# TYPE headroom_tokens_output_total counter",
-                f"headroom_tokens_output_total {self.tokens_output_total}",
-                "",
-                "# HELP headroom_tokens_saved_total Tokens saved by optimization",
-                "# TYPE headroom_tokens_saved_total counter",
-                f"headroom_tokens_saved_total {self.tokens_saved_total}",
-                "",
-                "# HELP headroom_latency_ms_sum Sum of request latencies",
-                "# TYPE headroom_latency_ms_sum counter",
-                f"headroom_latency_ms_sum {self.latency_sum_ms:.2f}",
-            ]
+            lines: list[str] = []
+            _append_metric(
+                lines,
+                name="headroom_requests_total",
+                metric_type="counter",
+                help_text="Total number of requests",
+                value=self.requests_total,
+            )
+            _append_metric(
+                lines,
+                name="headroom_requests_cached_total",
+                metric_type="counter",
+                help_text="Cached request count",
+                value=self.requests_cached,
+            )
+            _append_metric(
+                lines,
+                name="headroom_requests_rate_limited_total",
+                metric_type="counter",
+                help_text="Rate limited requests",
+                value=self.requests_rate_limited,
+            )
+            _append_metric(
+                lines,
+                name="headroom_requests_failed_total",
+                metric_type="counter",
+                help_text="Failed requests",
+                value=self.requests_failed,
+            )
+            _append_metric(
+                lines,
+                name="headroom_tokens_input_total",
+                metric_type="counter",
+                help_text="Total input tokens",
+                value=self.tokens_input_total,
+            )
+            _append_metric(
+                lines,
+                name="headroom_tokens_output_total",
+                metric_type="counter",
+                help_text="Total output tokens",
+                value=self.tokens_output_total,
+            )
+            _append_metric(
+                lines,
+                name="headroom_tokens_saved_total",
+                metric_type="counter",
+                help_text="Tokens saved by optimization",
+                value=self.tokens_saved_total,
+            )
+            _append_metric(
+                lines,
+                name="headroom_latency_ms_sum",
+                metric_type="counter",
+                help_text="Sum of request latencies in milliseconds",
+                value=round(self.latency_sum_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_latency_ms_count",
+                metric_type="counter",
+                help_text="Count of observed request latencies",
+                value=self.latency_count,
+            )
+            _append_metric(
+                lines,
+                name="headroom_latency_ms_min",
+                metric_type="gauge",
+                help_text="Minimum observed request latency in milliseconds",
+                value=0 if self.latency_count == 0 else round(self.latency_min_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_latency_ms_max",
+                metric_type="gauge",
+                help_text="Maximum observed request latency in milliseconds",
+                value=round(self.latency_max_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_overhead_ms_sum",
+                metric_type="counter",
+                help_text="Sum of Headroom processing overhead in milliseconds",
+                value=round(self.overhead_sum_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_overhead_ms_count",
+                metric_type="counter",
+                help_text="Count of observed Headroom overhead samples",
+                value=self.overhead_count,
+            )
+            _append_metric(
+                lines,
+                name="headroom_overhead_ms_min",
+                metric_type="gauge",
+                help_text="Minimum observed Headroom overhead in milliseconds",
+                value=0 if self.overhead_count == 0 else round(self.overhead_min_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_overhead_ms_max",
+                metric_type="gauge",
+                help_text="Maximum observed Headroom overhead in milliseconds",
+                value=round(self.overhead_max_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_ttfb_ms_sum",
+                metric_type="counter",
+                help_text="Sum of time to first byte in milliseconds",
+                value=round(self.ttfb_sum_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_ttfb_ms_count",
+                metric_type="counter",
+                help_text="Count of observed time-to-first-byte samples",
+                value=self.ttfb_count,
+            )
+            _append_metric(
+                lines,
+                name="headroom_ttfb_ms_min",
+                metric_type="gauge",
+                help_text="Minimum observed time to first byte in milliseconds",
+                value=0 if self.ttfb_count == 0 else round(self.ttfb_min_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_ttfb_ms_max",
+                metric_type="gauge",
+                help_text="Maximum observed time to first byte in milliseconds",
+                value=round(self.ttfb_max_ms, 2),
+            )
+            _append_metric(
+                lines,
+                name="headroom_cache_bust_total",
+                metric_type="counter",
+                help_text="Requests that lost provider cache efficiency because of compression",
+                value=self.cache_bust_count,
+            )
+            _append_metric(
+                lines,
+                name="headroom_cache_bust_tokens_lost_total",
+                metric_type="counter",
+                help_text="Tokens that lost provider cache discount because of compression",
+                value=self.cache_bust_tokens_lost,
+            )
 
-            # Per-provider metrics
             lines.extend(
                 [
-                    "",
                     "# HELP headroom_requests_by_provider Requests by provider",
                     "# TYPE headroom_requests_by_provider counter",
                 ]
             )
             for provider, count in self.requests_by_provider.items():
                 lines.append(f'headroom_requests_by_provider{{provider="{provider}"}} {count}')
+            lines.append("")
 
-            # Per-model metrics
             lines.extend(
                 [
-                    "",
                     "# HELP headroom_requests_by_model Requests by model",
                     "# TYPE headroom_requests_by_model counter",
                 ]
             )
             for model, count in self.requests_by_model.items():
                 lines.append(f'headroom_requests_by_model{{model="{model}"}} {count}')
+            lines.append("")
+
+            if self.transform_timing_sum:
+                lines.extend(
+                    [
+                        "# HELP headroom_transform_timing_ms_sum Sum of transform timing in milliseconds",
+                        "# TYPE headroom_transform_timing_ms_sum counter",
+                    ]
+                )
+                for name, total in self.transform_timing_sum.items():
+                    lines.append(
+                        f'headroom_transform_timing_ms_sum{{transform="{_escape_label_value(name)}"}} {round(total, 2)}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_transform_timing_ms_count Count of transform timing samples",
+                        "# TYPE headroom_transform_timing_ms_count counter",
+                    ]
+                )
+                for name, count in self.transform_timing_count.items():
+                    lines.append(
+                        f'headroom_transform_timing_ms_count{{transform="{_escape_label_value(name)}"}} {count}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_transform_timing_ms_max Maximum transform timing in milliseconds",
+                        "# TYPE headroom_transform_timing_ms_max gauge",
+                    ]
+                )
+                for name, max_value in self.transform_timing_max.items():
+                    lines.append(
+                        f'headroom_transform_timing_ms_max{{transform="{_escape_label_value(name)}"}} {round(max_value, 2)}'
+                    )
+                lines.append("")
+
+            if self.waste_signals_total:
+                lines.extend(
+                    [
+                        "# HELP headroom_waste_signal_tokens_total Tokens attributed to detected waste signals",
+                        "# TYPE headroom_waste_signal_tokens_total counter",
+                    ]
+                )
+                for signal_name, token_count in self.waste_signals_total.items():
+                    lines.append(
+                        f'headroom_waste_signal_tokens_total{{signal="{_escape_label_value(signal_name)}"}} {token_count}'
+                    )
+                lines.append("")
+
+            if self.cache_by_provider:
+                lines.extend(
+                    [
+                        "# HELP headroom_cache_read_tokens_total Provider cache read tokens",
+                        "# TYPE headroom_cache_read_tokens_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_cache_read_tokens_total{{provider="{provider}"}} {stats["cache_read_tokens"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_cache_write_tokens_total Provider cache write tokens",
+                        "# TYPE headroom_cache_write_tokens_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_cache_write_tokens_total{{provider="{provider}"}} {stats["cache_write_tokens"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_cache_write_ttl_tokens_total Provider cache write tokens by observed TTL bucket",
+                        "# TYPE headroom_cache_write_ttl_tokens_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_cache_write_ttl_tokens_total{{provider="{provider}",ttl="5m"}} {stats["cache_write_5m_tokens"]}'
+                    )
+                    lines.append(
+                        f'headroom_cache_write_ttl_tokens_total{{provider="{provider}",ttl="1h"}} {stats["cache_write_1h_tokens"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_cache_write_ttl_requests_total Provider cache write requests by observed TTL bucket",
+                        "# TYPE headroom_cache_write_ttl_requests_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_cache_write_ttl_requests_total{{provider="{provider}",ttl="5m"}} {stats["cache_write_5m_requests"]}'
+                    )
+                    lines.append(
+                        f'headroom_cache_write_ttl_requests_total{{provider="{provider}",ttl="1h"}} {stats["cache_write_1h_requests"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_uncached_input_tokens_total Input tokens not served from provider cache",
+                        "# TYPE headroom_uncached_input_tokens_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_uncached_input_tokens_total{{provider="{provider}"}} {stats["uncached_input_tokens"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_provider_cache_requests_total Requests with provider cache observations",
+                        "# TYPE headroom_provider_cache_requests_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_provider_cache_requests_total{{provider="{provider}"}} {stats["requests"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_provider_cache_hit_requests_total Requests with provider cache reads",
+                        "# TYPE headroom_provider_cache_hit_requests_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_provider_cache_hit_requests_total{{provider="{provider}"}} {stats["hit_requests"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_provider_cache_bust_total Provider-specific cache bust count",
+                        "# TYPE headroom_provider_cache_bust_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_provider_cache_bust_total{{provider="{provider}"}} {stats["bust_count"]}'
+                    )
+                lines.extend(
+                    [
+                        "",
+                        "# HELP headroom_provider_cache_bust_write_tokens_total Provider cache write tokens attributed to busts",
+                        "# TYPE headroom_provider_cache_bust_write_tokens_total counter",
+                    ]
+                )
+                for provider, stats in self.cache_by_provider.items():
+                    lines.append(
+                        f'headroom_provider_cache_bust_write_tokens_total{{provider="{provider}"}} {stats["bust_write_tokens"]}'
+                    )
+                lines.append("")
 
             return "\n".join(lines)

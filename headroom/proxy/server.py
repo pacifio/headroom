@@ -78,6 +78,16 @@ from headroom.config import (
     SmartCrusherConfig,
 )
 from headroom.dashboard import get_dashboard_html
+from headroom.observability import (
+    LangfuseTracingConfig,
+    OTelMetricsConfig,
+    configure_langfuse_tracing,
+    configure_otel_metrics,
+    get_langfuse_tracing_status,
+    get_otel_metrics_status,
+    shutdown_headroom_tracing,
+    shutdown_otel_metrics,
+)
 from headroom.providers import AnthropicProvider, OpenAIProvider
 
 # =============================================================================
@@ -824,7 +834,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     from contextlib import asynccontextmanager
 
     config = config or ProxyConfig()
-
     proxy = HeadroomProxy(config)
 
     # Telemetry beacon (anonymous aggregate stats).
@@ -890,32 +899,40 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
-        # Startup
-        await proxy.startup()
-        asyncio.create_task(_log_toin_stats_periodically())
-        if proxy.usage_reporter:
-            await proxy.usage_reporter.start(proxy)
-        if proxy.traffic_learner:
-            await proxy.traffic_learner.start()
+        configure_otel_metrics(OTelMetricsConfig.from_env(default_service_name="headroom-proxy"))
+        configure_langfuse_tracing(
+            LangfuseTracingConfig.from_env(default_service_name="headroom-proxy")
+        )
 
-        # Only start beacon if we acquire the lock (first worker wins)
-        _beacon_is_owner[0] = _try_acquire_beacon_lock()
-        if _beacon_is_owner[0]:
-            await _beacon.start()
-        else:
-            logger.debug("Beacon: skipping (another worker owns the lock)")
+        try:
+            # Startup
+            await proxy.startup()
+            asyncio.create_task(_log_toin_stats_periodically())
+            if proxy.usage_reporter:
+                await proxy.usage_reporter.start(proxy)
+            if proxy.traffic_learner:
+                await proxy.traffic_learner.start()
 
-        yield
+            # Only start beacon if we acquire the lock (first worker wins)
+            _beacon_is_owner[0] = _try_acquire_beacon_lock()
+            if _beacon_is_owner[0]:
+                await _beacon.start()
+            else:
+                logger.debug("Beacon: skipping (another worker owns the lock)")
 
-        # Shutdown
-        if _beacon_is_owner[0]:
-            await _beacon.stop()
-            _release_beacon_lock()
-        if proxy.usage_reporter:
-            await proxy.usage_reporter.stop()
-        if proxy.traffic_learner:
-            await proxy.traffic_learner.stop()
-        await proxy.shutdown()
+            yield
+        finally:
+            # Shutdown
+            if _beacon_is_owner[0]:
+                await _beacon.stop()
+                _release_beacon_lock()
+            if proxy.usage_reporter:
+                await proxy.usage_reporter.stop()
+            if proxy.traffic_learner:
+                await proxy.traffic_learner.stop()
+            await proxy.shutdown()
+            shutdown_headroom_tracing()
+            shutdown_otel_metrics()
 
     app = FastAPI(
         title="Headroom Proxy",
@@ -1159,6 +1176,8 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 "avg_compression_ratio": round(telemetry_stats.get("avg_compression_ratio", 0), 4),
                 "avg_token_reduction": round(telemetry_stats.get("avg_token_reduction", 0), 4),
             },
+            "otel": get_otel_metrics_status(),
+            "langfuse": get_langfuse_tracing_status(),
             "feedback_loop": {
                 "tools_tracked": feedback_stats.get("tools_tracked", 0),
                 "total_compressions": feedback_stats.get("total_compressions", 0),
