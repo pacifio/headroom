@@ -8,6 +8,11 @@ from headroom.install.supervisors import (
     _linux_task_spec,
     _macos_launchd_plist,
     _render_windows_runner,
+    install_supervisor,
+    remove_supervisor,
+    render_runner_scripts,
+    start_supervisor,
+    stop_supervisor,
 )
 
 
@@ -92,3 +97,77 @@ def test_render_windows_runner_writes_ps1_and_cmd_wrappers(tmp_path: Path) -> No
         'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-headroom.ps1" %*'
         in cmd_content
     )
+
+
+def test_render_runner_scripts_writes_unix_scripts(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.os.name", "posix")
+    monkeypatch.setattr(
+        "headroom.install.supervisors.resolve_headroom_command", lambda: ["headroom"]
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    manifest = _manifest()
+
+    records = render_runner_scripts(manifest)
+
+    assert {record.path.split("\\")[-1].split("/")[-1] for record in records} == {
+        "run-headroom.sh",
+        "ensure-headroom.sh",
+    }
+
+
+def test_install_supervisor_none_returns_runner_records(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.os.name", "posix")
+    monkeypatch.setattr(
+        "headroom.install.supervisors.resolve_headroom_command", lambda: ["headroom"]
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    manifest = _manifest(supervisor=SupervisorKind.NONE.value)
+
+    records = install_supervisor(manifest)
+
+    assert len(records) == 2
+    assert all(record.kind == "script" for record in records)
+
+
+def test_start_and_stop_supervisor_use_linux_systemctl(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "linux")
+    monkeypatch.setattr(
+        "headroom.install.supervisors.subprocess.run",
+        lambda command, **kwargs: calls.append(command),
+    )
+    manifest = _manifest()
+
+    start_supervisor(manifest)
+    stop_supervisor(manifest)
+
+    assert calls == [
+        ["systemctl", "--user", "restart", "headroom-default"],
+        ["systemctl", "--user", "stop", "headroom-default"],
+    ]
+
+
+def test_remove_supervisor_removes_user_crontab_block(monkeypatch) -> None:
+    calls: list[tuple[list[str], str | None]] = []
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "linux")
+
+    class Result:
+        def __init__(self, returncode: int = 0, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(command: list[str], **kwargs):
+        calls.append((command, kwargs.get("input")))
+        if command == ["crontab", "-l"]:
+            return Result(
+                stdout="# >>> headroom default >>>\n@reboot /tmp/ensure\n# <<< headroom default <<<\n"
+            )
+        return Result()
+
+    monkeypatch.setattr("headroom.install.supervisors.subprocess.run", fake_run)
+    manifest = _manifest(supervisor=SupervisorKind.TASK.value)
+
+    remove_supervisor(manifest)
+
+    assert calls[0][0] == ["crontab", "-l"]
+    assert calls[1][0] == ["crontab", "-"]

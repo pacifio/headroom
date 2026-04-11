@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from headroom.install.models import DeploymentManifest
+from headroom.install.models import DeploymentManifest, ManagedMutation
 from headroom.install.providers import (
     _apply_claude_provider_scope,
     _apply_codex_provider_scope,
@@ -138,3 +138,42 @@ def test_windows_env_scope_restores_previous_values(monkeypatch, tmp_path: Path)
         in command[-1]
         for command in calls
     )
+
+
+def test_remove_windows_env_scope_requires_name_and_scope() -> None:
+    try:
+        _remove_windows_env_scope([ManagedMutation(target="env", kind="windows-env", data={})])
+    except ValueError as exc:
+        assert "variable name" in str(exc)
+    else:
+        raise AssertionError("expected missing variable name to raise")
+
+    try:
+        _remove_windows_env_scope(
+            [ManagedMutation(target="env", kind="windows-env", data={"name": "X", "scope": 1})]
+        )
+    except ValueError as exc:
+        assert "valid scope" in str(exc)
+    else:
+        raise AssertionError("expected invalid scope to raise")
+
+
+def test_apply_mutations_runs_openclaw_for_user_scope(monkeypatch, tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    manifest.scope = "user"
+    manifest.targets = ["openclaw"]
+    manifest.base_env = {"HEADROOM_PORT": "8787"}
+    manifest.tool_envs = {}
+
+    monkeypatch.setattr("headroom.install.providers.os.name", "posix")
+    monkeypatch.setattr("headroom.install.providers._apply_unix_env_scope", lambda deployment: [])
+    monkeypatch.setattr(
+        "headroom.install.providers._apply_openclaw_provider_scope",
+        lambda deployment: ManagedMutation(target="openclaw", kind="openclaw-wrap"),
+    )
+
+    from headroom.install.providers import apply_mutations
+
+    mutations = apply_mutations(manifest)
+
+    assert [mutation.kind for mutation in mutations] == ["openclaw-wrap"]
