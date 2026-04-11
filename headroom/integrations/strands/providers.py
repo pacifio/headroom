@@ -8,12 +8,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from headroom.providers import (
-    AnthropicProvider,
-    GoogleProvider,
-    OpenAIProvider,
-)
+from headroom.providers.anthropic import AnthropicProvider
 from headroom.providers.base import Provider
+from headroom.providers.google import GoogleProvider
+from headroom.providers.openai import OpenAIProvider
 
 logger = logging.getLogger(__name__)
 
