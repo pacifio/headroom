@@ -1,13 +1,20 @@
 """Tests for session analyzer — digest builder and LLM-based analysis."""
 
+import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from headroom.learn.analyzer import (
     SessionAnalyzer,
     _build_digest,
+    _call_cli_llm,
+    _call_llm,
     _detect_default_model,
     _parse_llm_response,
+    _strip_fenced_json,
 )
 from headroom.learn.models import (
     AnalysisResult,
@@ -347,14 +354,235 @@ class TestDetectDefaultModel:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         assert _detect_default_model() == "claude-sonnet-4-6"
 
-    def test_no_keys_raises(self, monkeypatch):
+    def test_no_keys_no_cli_raises(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        import pytest
+        monkeypatch.setattr("headroom.learn.analyzer.shutil.which", lambda _name: None)
 
         with pytest.raises(RuntimeError, match="No LLM API key found"):
             _detect_default_model()
+
+    def test_cli_fallback_claude(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "headroom.learn.analyzer.shutil.which",
+            lambda name: f"/usr/bin/{name}" if name == "claude" else None,
+        )
+        assert _detect_default_model() == "claude-cli"
+
+    def test_cli_fallback_gemini(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "headroom.learn.analyzer.shutil.which",
+            lambda name: f"/usr/bin/{name}" if name == "gemini" else None,
+        )
+        assert _detect_default_model() == "gemini-cli"
+
+    def test_cli_fallback_codex(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "headroom.learn.analyzer.shutil.which",
+            lambda name: f"/usr/bin/{name}" if name == "codex" else None,
+        )
+        assert _detect_default_model() == "codex-cli"
+
+    def test_api_key_preferred_over_cli(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "headroom.learn.analyzer.shutil.which",
+            lambda name: f"/usr/bin/{name}" if name == "claude" else None,
+        )
+        assert _detect_default_model() == "claude-sonnet-4-6"
+
+    def test_env_var_selects_gemini(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("HEADROOM_LEARN_CLI", "gemini")
+        assert _detect_default_model() == "gemini-cli"
+
+    def test_env_var_selects_codex(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("HEADROOM_LEARN_CLI", "codex")
+        assert _detect_default_model() == "codex-cli"
+
+    def test_env_var_invalid_raises(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("HEADROOM_LEARN_CLI", "unknown-tool")
+        with pytest.raises(ValueError, match="not a supported CLI"):
+            _detect_default_model()
+
+    def test_api_key_preferred_over_env_var(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("HEADROOM_LEARN_CLI", "gemini")
+        assert _detect_default_model() == "claude-sonnet-4-6"
+
+    def test_env_var_preferred_over_auto_detect(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("HEADROOM_LEARN_CLI", "codex")
+        monkeypatch.setattr(
+            "headroom.learn.analyzer.shutil.which",
+            lambda name: f"/usr/bin/{name}" if name == "claude" else None,
+        )
+        # codex selected via env var, even though claude is in PATH
+        assert _detect_default_model() == "codex-cli"
+
+
+# =============================================================================
+# CLI LLM Backend
+# =============================================================================
+
+
+class TestStripFencedJson:
+    def test_raw_json(self):
+        result = _strip_fenced_json('{"key": "value"}')
+        assert result == {"key": "value"}
+
+    def test_fenced_json(self):
+        raw = '```json\n{"key": "value"}\n```'
+        result = _strip_fenced_json(raw)
+        assert result == {"key": "value"}
+
+    def test_fenced_no_language_tag(self):
+        raw = '```\n{"key": "value"}\n```'
+        result = _strip_fenced_json(raw)
+        assert result == {"key": "value"}
+
+    def test_whitespace_padding(self):
+        raw = '  \n```json\n{"key": "value"}\n```\n  '
+        result = _strip_fenced_json(raw)
+        assert result == {"key": "value"}
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(json.JSONDecodeError):
+            _strip_fenced_json("not json at all")
+
+
+class TestCallCliLlm:
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_claude_cli_success(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"context_file_rules": [], "memory_file_rules": []}',
+            stderr="",
+        )
+        result = _call_cli_llm("test digest", "claude-cli")
+        assert result == {"context_file_rules": [], "memory_file_rules": []}
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["claude", "-p"]
+        # Prompt passed via stdin, not as an argument
+        assert mock_run.call_args.kwargs.get("input") is not None
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_codex_cli_uses_exec(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"context_file_rules": [], "memory_file_rules": []}',
+            stderr="",
+        )
+        result = _call_cli_llm("test digest", "codex-cli")
+        assert result == {"context_file_rules": [], "memory_file_rules": []}
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["codex", "exec"]
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_gemini_cli_uses_p_flag(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"context_file_rules": [], "memory_file_rules": []}',
+            stderr="",
+        )
+        _call_cli_llm("test digest", "gemini-cli")
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["gemini", "-p"]
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_cli_nonzero_exit_raises(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Error: auth required",
+        )
+        with pytest.raises(RuntimeError, match="failed.*exit 1"):
+            _call_cli_llm("test digest", "claude-cli")
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_cli_stderr_truncated_in_error(self, mock_run: MagicMock):
+        long_stderr = "x" * 5000
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr=long_stderr,
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            _call_cli_llm("test digest", "claude-cli")
+        # Full 5000-char stderr should not appear in the error message
+        assert long_stderr not in str(exc_info.value)
+
+    def test_unknown_cli_model_raises(self):
+        with pytest.raises(ValueError, match="Unknown CLI model"):
+            _call_cli_llm("test digest", "unknown-cli")
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_fenced_output_parsed(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='```json\n{"context_file_rules": [], "memory_file_rules": []}\n```',
+            stderr="",
+        )
+        result = _call_cli_llm("test digest", "claude-cli")
+        assert result == {"context_file_rules": [], "memory_file_rules": []}
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_cli_not_installed_raises(self, mock_run: MagicMock):
+        mock_run.side_effect = FileNotFoundError("No such file or directory: 'codex'")
+        with pytest.raises(RuntimeError, match="not found in PATH"):
+            _call_cli_llm("test digest", "codex-cli")
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_timeout_raises_runtime_error(self, mock_run: MagicMock):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["claude", "-p"], timeout=120)
+        with pytest.raises(RuntimeError, match="did not respond within"):
+            _call_cli_llm("test digest", "claude-cli")
+
+    @patch("headroom.learn.analyzer.subprocess.run")
+    def test_unparseable_output_raises_with_context(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="This is not JSON at all",
+            stderr="",
+        )
+        with pytest.raises(RuntimeError, match="unparseable output"):
+            _call_cli_llm("test digest", "claude-cli")
+
+
+class TestCallLlmRouting:
+    @patch("headroom.learn.analyzer._call_cli_llm")
+    def test_routes_cli_model_to_cli_backend(self, mock_cli: MagicMock):
+        mock_cli.return_value = {"context_file_rules": [], "memory_file_rules": []}
+        result = _call_llm("test digest", "claude-cli")
+        mock_cli.assert_called_once_with("test digest", "claude-cli")
+        assert result == {"context_file_rules": [], "memory_file_rules": []}
+
+    @patch("headroom.learn.analyzer._call_cli_llm")
+    def test_routes_codex_cli(self, mock_cli: MagicMock):
+        mock_cli.return_value = {}
+        _call_llm("digest", "codex-cli")
+        mock_cli.assert_called_once_with("digest", "codex-cli")
 
 
 # =============================================================================

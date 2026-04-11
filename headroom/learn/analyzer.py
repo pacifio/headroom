@@ -8,6 +8,8 @@ structured recommendations for CLAUDE.md / MEMORY.md.
 
 Supports any LLM provider via LiteLLM: Anthropic, OpenAI, Google, Bedrock,
 Ollama, and 100+ others. Auto-detects the best available model from env vars.
+Also supports CLI-based backends (claude, gemini, codex) for subscription
+users without raw API keys.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 
 from .models import (
     AnalysisResult,
@@ -37,17 +41,61 @@ _MODEL_DEFAULTS: list[tuple[str, str]] = [
 
 _MAX_DIGEST_TOKENS = 80_000  # Budget for the digest (leave room for prompt + output)
 
+# CLI tools to try when no API key is set (checked in order).
+# Each entry: (binary_name, model_identifier, command_prefix)
+_CLI_BACKENDS: list[tuple[str, str, list[str]]] = [
+    ("claude", "claude-cli", ["claude", "-p"]),
+    ("gemini", "gemini-cli", ["gemini", "-p"]),
+    ("codex", "codex-cli", ["codex", "exec"]),
+]
+
+# Set of valid CLI model identifiers, derived from _CLI_BACKENDS.
+_CLI_MODEL_IDS: set[str] = {model for _, model, _ in _CLI_BACKENDS}
+
+_USER_PROMPT_PREFIX = "Analyze these coding agent sessions and return JSON recommendations:\n\n"  # Shared by _call_cli_llm and _call_llm
+_MAX_SNIPPET_LEN = 2000  # Max chars of CLI output (stdout/stderr) in error messages
+_CLI_TIMEOUT = 120  # Subprocess timeout for CLI backends, in seconds
+
 
 def _detect_default_model() -> str:
-    """Pick the best available model based on which API keys are set."""
+    """Pick the best available model based on API keys, env config, or CLI tools.
+
+    Priority order:
+      1. API key present → use corresponding LiteLLM model
+      2. HEADROOM_LEARN_CLI env var → use specified CLI backend
+      3. Auto-detect installed CLI tools (claude > gemini > codex)
+      4. Raise RuntimeError with setup instructions
+    """
+    # 1. API key detection (existing behavior)
     for env_var, model in _MODEL_DEFAULTS:
         if os.environ.get(env_var):
             return model
+
+    # 2. Explicit CLI selection via environment variable
+    cli_override = os.environ.get("HEADROOM_LEARN_CLI")
+    if cli_override:
+        for cli_name, model, _cmd in _CLI_BACKENDS:
+            if cli_name == cli_override:
+                logger.info("HEADROOM_LEARN_CLI=%s — using %s CLI backend", cli_override, cli_name)
+                return model
+        valid = ", ".join(name for name, _, _ in _CLI_BACKENDS)
+        raise ValueError(
+            f"HEADROOM_LEARN_CLI={cli_override!r} is not a supported CLI. Valid values: {valid}"
+        )
+
+    # 3. Auto-detect installed CLI tools
+    for cli_name, model, _cmd in _CLI_BACKENDS:
+        if shutil.which(cli_name):
+            logger.info("No API key found — auto-detected %s CLI as LLM backend", cli_name)
+            return model
+
     raise RuntimeError(
         "No LLM API key found. headroom learn needs one of:\n"
         "  export ANTHROPIC_API_KEY=sk-ant-...   → uses claude-sonnet-4-6\n"
         "  export OPENAI_API_KEY=sk-...          → uses gpt-4o\n"
         "  export GEMINI_API_KEY=...             → uses gemini-2.0-flash\n"
+        "Or set HEADROOM_LEARN_CLI to a coding agent CLI (claude, gemini, codex).\n"
+        "Or install one of those CLIs for auto-detection.\n"
         "Or specify a model directly: headroom learn --model <litellm-model-name>"
     )
 
@@ -263,12 +311,118 @@ Return ONLY valid JSON matching this schema — no other text:
 """
 
 
+def _strip_fenced_json(raw: str) -> dict:
+    """Strip optional markdown fences and parse JSON.
+
+    Handles both raw JSON and fenced code blocks (e.g. ``​`json ... ``​`).
+    Only the first opening fence and last closing fence are removed, preserving
+    any triple-backtick content that may appear inside the JSON payload.
+
+    Args:
+        raw: Raw text output from an LLM, possibly wrapped in markdown fences.
+
+    Returns:
+        Parsed JSON as a dictionary.
+
+    Raises:
+        json.JSONDecodeError: If the text is not valid JSON after stripping.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Remove the first line (opening fence, e.g. ```json)
+        lines = lines[1:]
+        # Remove the last line if it is a closing fence
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    result: dict = json.loads(text)
+    return result
+
+
+def _call_cli_llm(digest: str, model: str) -> dict:
+    """Call a locally installed CLI tool as the LLM backend.
+
+    Enables keyless usage for subscription-based CLI tools that handle
+    their own OAuth authentication. The prompt is passed via stdin to avoid
+    OS ``ARG_MAX`` limits and argument-injection risks.
+
+    CLI invocations:
+      claude-cli → echo <prompt> | claude -p
+      gemini-cli → echo <prompt> | gemini -p
+      codex-cli  → echo <prompt> | codex exec
+
+    Args:
+        digest: Token-efficient session digest to analyze.
+        model: CLI model identifier (e.g. ``claude-cli``).
+
+    Returns:
+        Parsed JSON recommendations from the CLI tool.
+
+    Raises:
+        ValueError: If *model* is not a known CLI backend.
+        RuntimeError: If the CLI is not installed, exits non-zero, or times out.
+    """
+    cmd: list[str] | None = None
+    for _name, model_name, cmd_parts in _CLI_BACKENDS:
+        if model_name == model:
+            cmd = cmd_parts
+            break
+    if cmd is None:
+        raise ValueError(f"Unknown CLI model: {model}")
+
+    prompt = _SYSTEM_PROMPT + "\n\n" + _USER_PROMPT_PREFIX + digest
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=_CLI_TIMEOUT,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"`{cmd[0]}` not found in PATH. Install it or use a different backend "
+            "with --model <litellm-model-name>."
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"`{' '.join(cmd)}` did not respond within {_CLI_TIMEOUT}s. "
+            "Check network connectivity or try a different backend with "
+            "--model <litellm-model-name>."
+        ) from None
+
+    if result.returncode != 0:
+        stderr_snippet = (result.stderr or "")[:_MAX_SNIPPET_LEN]
+        raise RuntimeError(
+            f"`{' '.join(cmd)}` failed (exit {result.returncode}):\n{stderr_snippet}"
+        )
+
+    # Log stderr warnings even on success (auth refreshes, deprecation notices).
+    if result.stderr and result.stderr.strip():
+        logger.debug("CLI stderr (exit 0): %s", result.stderr[:_MAX_SNIPPET_LEN])
+
+    try:
+        return _strip_fenced_json(result.stdout)
+    except json.JSONDecodeError as exc:
+        stdout_snippet = (result.stdout or "")[:_MAX_SNIPPET_LEN]
+        raise RuntimeError(
+            f"`{' '.join(cmd)}` returned unparseable output. "
+            f"First {_MAX_SNIPPET_LEN} chars:\n{stdout_snippet}"
+        ) from exc
+
+
 def _call_llm(digest: str, model: str) -> dict:
     """Call LLM with the session digest and return parsed JSON.
 
     Uses LiteLLM for provider-agnostic access. The model string determines
     the provider: "claude-*" → Anthropic, "gpt-*" → OpenAI, "gemini/*" → Google, etc.
+    For CLI-based models (ending in "-cli"), delegates to ``_call_cli_llm``.
     """
+    if model in _CLI_MODEL_IDS:
+        return _call_cli_llm(digest, model)
+
     import litellm
 
     # Suppress LiteLLM's verbose logging
@@ -286,10 +440,7 @@ def _call_llm(digest: str, model: str) -> dict:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": (
-                    "Analyze these coding agent sessions and return JSON recommendations:\n\n"
-                    + digest
-                ),
+                "content": _USER_PROMPT_PREFIX + digest,
             },
         ],
         max_tokens=4096,
@@ -298,16 +449,7 @@ def _call_llm(digest: str, model: str) -> dict:
 
     # Extract text from response
     text = response.choices[0].message.content or ""
-
-    # Parse JSON — handle both raw JSON and ```json fenced blocks
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [ln for ln in lines[1:] if not ln.strip().startswith("```")]
-        text = "\n".join(lines)
-
-    result: dict = json.loads(text)
-    return result
+    return _strip_fenced_json(text)
 
 
 # =============================================================================

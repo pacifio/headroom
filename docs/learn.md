@@ -154,7 +154,7 @@ Options:
   --apply                      Write recommendations (default: dry-run)
   --agent [auto|claude|codex|gemini]
                                Which agent to analyze (default: auto-detect)
-  --model TEXT                 LLM for analysis (default: auto from API keys)
+  --model TEXT                 LLM for analysis (default: auto from API keys or CLI)
 ```
 
 ### Supported Agents
@@ -164,6 +164,35 @@ Options:
 | **Claude Code** | Reads `~/.claude/projects/*.jsonl` | ClaudeCodeWriter | CLAUDE.md, MEMORY.md |
 | **OpenAI Codex** | Reads `~/.codex/sessions/*.json` | CodexWriter | AGENTS.md, instructions.md |
 | **Gemini CLI** | Reads `~/.gemini/tmp/*/chats/session-*.json` | GeminiWriter | GEMINI.md |
+
+## LLM Backend Selection
+
+`headroom learn` needs an LLM to analyze your sessions. It picks one automatically using this priority:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `--model` flag | `headroom learn --model gpt-4o` |
+| 2 | API key env var | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` |
+| 3 | `HEADROOM_LEARN_CLI` env var | `export HEADROOM_LEARN_CLI=gemini` |
+| 4 | Auto-detect installed CLIs | Checks PATH for `claude`, `gemini`, `codex` |
+
+### Using without an API key
+
+If you use Claude Code, Gemini CLI, or Codex via subscription (no raw API key), `headroom learn` can call them directly:
+
+```bash
+# Auto-detects claude in PATH — no API key needed
+headroom learn
+
+# Explicitly select a CLI backend
+headroom learn --model gemini-cli
+
+# Pin a CLI via environment variable
+export HEADROOM_LEARN_CLI=codex
+headroom learn
+```
+
+Valid values for `HEADROOM_LEARN_CLI`: `claude`, `gemini`, `codex`.
 
 ## Real-World Results
 
