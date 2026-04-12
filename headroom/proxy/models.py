@@ -199,3 +199,8 @@ class ProxyConfig:
 
     # Compression Hooks
     hooks: Any = None
+
+    # Subscription Window Tracking (Anthropic OAuth accounts)
+    subscription_tracking_enabled: bool = True
+    subscription_poll_interval_s: int = 10
+    subscription_active_window_s: int = 60

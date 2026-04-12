@@ -11,6 +11,7 @@ from threading import Lock
 from typing import Any, Literal
 
 from opentelemetry import metrics
+from opentelemetry.metrics import CallbackOptions, Observation
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,60 @@ class HeadroomOtelMetrics:
             unit="1",
         )
 
+        # Backing values updated by record_subscription_window()
+        self._sub_5h_util_val: float = 0.0
+        self._sub_7d_util_val: float = 0.0
+        self._sub_5h_reset_val: float = 0.0
+        self._sub_7d_reset_val: float = 0.0
+        self._sub_overage_val: float = 0.0
+
+        # Subscription window gauges (Anthropic OAuth accounts)
+        def _cb_5h_util(opts: CallbackOptions) -> list[Observation]:
+            return [Observation(self._sub_5h_util_val)]
+
+        def _cb_7d_util(opts: CallbackOptions) -> list[Observation]:
+            return [Observation(self._sub_7d_util_val)]
+
+        def _cb_5h_reset(opts: CallbackOptions) -> list[Observation]:
+            return [Observation(self._sub_5h_reset_val)]
+
+        def _cb_7d_reset(opts: CallbackOptions) -> list[Observation]:
+            return [Observation(self._sub_7d_reset_val)]
+
+        def _cb_overage(opts: CallbackOptions) -> list[Observation]:
+            return [Observation(self._sub_overage_val)]
+
+        self._meter.create_observable_gauge(
+            "headroom.subscription.5h_utilization_pct",
+            description="Anthropic 5-hour rate-limit window utilisation (0–100%).",
+            unit="1",
+            callbacks=[_cb_5h_util],
+        )
+        self._meter.create_observable_gauge(
+            "headroom.subscription.7d_utilization_pct",
+            description="Anthropic 7-day rate-limit window utilisation (0–100%).",
+            unit="1",
+            callbacks=[_cb_7d_util],
+        )
+        self._meter.create_observable_gauge(
+            "headroom.subscription.5h_seconds_to_reset",
+            description="Seconds until the Anthropic 5-hour window resets.",
+            unit="s",
+            callbacks=[_cb_5h_reset],
+        )
+        self._meter.create_observable_gauge(
+            "headroom.subscription.7d_seconds_to_reset",
+            description="Seconds until the Anthropic 7-day window resets.",
+            unit="s",
+            callbacks=[_cb_7d_reset],
+        )
+        self._meter.create_observable_gauge(
+            "headroom.subscription.overage_usd",
+            description="Anthropic extra-usage (overage) credits consumed in USD.",
+            unit="USD",
+            callbacks=[_cb_overage],
+        )
+
     @staticmethod
     def _attrs(**attrs: Any) -> dict[str, Any]:
         filtered: dict[str, Any] = {}
@@ -389,6 +444,24 @@ class HeadroomOtelMetrics:
             1,
             self._attrs(model=model, operation=operation, error_type=error_type),
         )
+
+    def record_subscription_window(self, state: dict[str, Any]) -> None:
+        """Update OTEL subscription gauge backing values from the tracker state dict."""
+        latest = state.get("latest") or {}
+
+        five_hour = latest.get("five_hour") or {}
+        if five_hour:
+            self._sub_5h_util_val = float(five_hour.get("utilization_pct", 0.0))
+            self._sub_5h_reset_val = float(five_hour.get("seconds_to_reset") or 0.0)
+
+        seven_day = latest.get("seven_day") or {}
+        if seven_day:
+            self._sub_7d_util_val = float(seven_day.get("utilization_pct", 0.0))
+            self._sub_7d_reset_val = float(seven_day.get("seconds_to_reset") or 0.0)
+
+        extra = latest.get("extra_usage") or {}
+        if extra.get("is_enabled"):
+            self._sub_overage_val = float(extra.get("used_credits_usd") or 0.0)
 
 
 def get_otel_metrics() -> HeadroomOtelMetrics:

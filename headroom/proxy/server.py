@@ -127,6 +127,11 @@ from headroom.proxy.prometheus_metrics import PrometheusMetrics  # noqa: F401
 from headroom.proxy.rate_limiter import TokenBucketRateLimiter  # noqa: F401
 from headroom.proxy.request_logger import RequestLogger  # noqa: F401
 from headroom.proxy.semantic_cache import SemanticCache  # noqa: F401
+from headroom.subscription.tracker import (
+    configure_subscription_tracker,
+    get_subscription_tracker,
+    shutdown_subscription_tracker,
+)
 from headroom.telemetry import get_telemetry_collector
 from headroom.telemetry.beacon import is_telemetry_enabled
 from headroom.telemetry.toin import get_toin
@@ -662,6 +667,21 @@ class HeadroomProxy(
             logger.info("CCR: DISABLED")
         logger.info(f"Savings history: {self.metrics.savings_tracker.storage_path}")
 
+        # Subscription window tracker (Anthropic OAuth accounts)
+        if self.config.subscription_tracking_enabled:
+            tracker = configure_subscription_tracker(
+                poll_interval_s=self.config.subscription_poll_interval_s,
+                active_window_s=self.config.subscription_active_window_s,
+            )
+            await tracker.start()
+            logger.info(
+                "Subscription tracking: ENABLED "
+                f"(poll_interval={self.config.subscription_poll_interval_s}s, "
+                f"active_window={self.config.subscription_active_window_s}s)"
+            )
+        else:
+            logger.info("Subscription tracking: DISABLED")
+
         # Log anonymous telemetry status so operators can see it in the log stream
         if is_telemetry_enabled():
             logger.info(
@@ -679,6 +699,9 @@ class HeadroomProxy(
 
         if self.memory_handler and hasattr(self.memory_handler, "close"):
             await self.memory_handler.close()
+
+        # Stop subscription tracker
+        await shutdown_subscription_tracker()
 
         # Print final stats
         self._print_summary()
@@ -1367,6 +1390,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             "cache": await proxy.cache.stats() if proxy.cache else None,
             "rate_limiter": await proxy.rate_limiter.stats() if proxy.rate_limiter else None,
             "recent_requests": proxy.logger.get_recent(10) if proxy.logger else [],
+            "subscription_window": get_subscription_tracker().state
+            if get_subscription_tracker()
+            else None,
         }
 
     @app.get("/stats-history")
@@ -1384,6 +1410,17 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             )
 
         return proxy.metrics.savings_tracker.history_response()
+
+    @app.get("/subscription-window")
+    async def subscription_window():
+        """Current Anthropic subscription window utilisation and Headroom contribution."""
+        tracker = get_subscription_tracker()
+        if tracker is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Subscription tracking is not enabled"},
+            )
+        return JSONResponse(content=tracker.state)
 
     @app.get("/metrics")
     async def metrics():

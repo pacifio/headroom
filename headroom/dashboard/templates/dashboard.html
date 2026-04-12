@@ -167,7 +167,136 @@
             </div>
         </template>
 
-        <!-- Prefix Cache Impact (Provider-Aware) -->
+        <!-- Anthropic Subscription Window -->
+        <template x-if="stats.subscription_window && stats.subscription_window.latest">
+            <div class="bg-surface rounded-lg p-4 border border-border mb-6">
+                <div class="flex justify-between items-center mb-4">
+                    <div class="text-sm font-medium text-gray-300">Anthropic Subscription Window</div>
+                    <div class="flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full pulse-live"
+                              :class="stats.subscription_window.last_active_at ? 'bg-emerald-400' : 'bg-gray-600'"></span>
+                        <span class="text-xs text-gray-500" x-text="stats.subscription_window.last_active_at ? 'Active' : 'Idle'"></span>
+                    </div>
+                </div>
+
+                <!-- 5h / 7d progress bars -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <!-- 5-hour window -->
+                    <template x-if="stats.subscription_window.latest.five_hour">
+                        <div>
+                            <div class="flex justify-between text-xs mb-1">
+                                <span class="text-gray-400 uppercase tracking-wide">5-Hour Window</span>
+                                <span class="tabular-nums font-mono"
+                                      :class="stats.subscription_window.latest.five_hour.utilization_pct > 80 ? 'text-red-400' : stats.subscription_window.latest.five_hour.utilization_pct > 60 ? 'text-amber-400' : 'text-emerald-400'"
+                                      x-text="(stats.subscription_window.latest.five_hour.utilization_pct || 0).toFixed(1) + '%'"></span>
+                            </div>
+                            <div class="w-full h-3 bg-border rounded-full overflow-hidden">
+                                <div class="h-full rounded-full transition-all duration-500"
+                                     :class="stats.subscription_window.latest.five_hour.utilization_pct > 80 ? 'bg-red-500' : stats.subscription_window.latest.five_hour.utilization_pct > 60 ? 'bg-amber-500' : 'bg-emerald-500'"
+                                     :style="'width: ' + Math.min(stats.subscription_window.latest.five_hour.utilization_pct || 0, 100) + '%'"></div>
+                            </div>
+                            <div class="text-xs text-gray-500 mt-1"
+                                 x-text="'Resets in ' + formatResetTime(stats.subscription_window.latest.five_hour.seconds_to_reset)"></div>
+                        </div>
+                    </template>
+
+                    <!-- 7-day window -->
+                    <template x-if="stats.subscription_window.latest.seven_day">
+                        <div>
+                            <div class="flex justify-between text-xs mb-1">
+                                <span class="text-gray-400 uppercase tracking-wide">7-Day Window</span>
+                                <span class="tabular-nums font-mono"
+                                      :class="stats.subscription_window.latest.seven_day.utilization_pct > 80 ? 'text-red-400' : stats.subscription_window.latest.seven_day.utilization_pct > 60 ? 'text-amber-400' : 'text-emerald-400'"
+                                      x-text="(stats.subscription_window.latest.seven_day.utilization_pct || 0).toFixed(1) + '%'"></span>
+                            </div>
+                            <div class="w-full h-3 bg-border rounded-full overflow-hidden">
+                                <div class="h-full rounded-full transition-all duration-500"
+                                     :class="stats.subscription_window.latest.seven_day.utilization_pct > 80 ? 'bg-red-500' : stats.subscription_window.latest.seven_day.utilization_pct > 60 ? 'bg-amber-500' : 'bg-emerald-500'"
+                                     :style="'width: ' + Math.min(stats.subscription_window.latest.seven_day.utilization_pct || 0, 100) + '%'"></div>
+                            </div>
+                            <div class="text-xs text-gray-500 mt-1"
+                                 x-text="'Resets in ' + formatResetTime(stats.subscription_window.latest.seven_day.seconds_to_reset)"></div>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Overage / extra usage -->
+                <template x-if="stats.subscription_window.latest.extra_usage && stats.subscription_window.latest.extra_usage.is_enabled">
+                    <div class="border-t border-border pt-3 mb-3">
+                        <div class="flex justify-between text-xs mb-1">
+                            <span class="text-gray-400 uppercase tracking-wide">Extra Usage (Overage)</span>
+                            <span class="text-amber-400 tabular-nums font-mono"
+                                  x-text="'$' + formatCurrency(stats.subscription_window.latest.extra_usage.used_credits_usd || 0) + (stats.subscription_window.latest.extra_usage.monthly_limit_usd ? ' / $' + formatCurrency(stats.subscription_window.latest.extra_usage.monthly_limit_usd) : '')"></span>
+                        </div>
+                        <template x-if="stats.subscription_window.latest.extra_usage.utilization_pct != null">
+                            <div class="w-full h-2 bg-border rounded-full overflow-hidden">
+                                <div class="h-full bg-amber-500 rounded-full transition-all duration-500"
+                                     :style="'width: ' + Math.min(stats.subscription_window.latest.extra_usage.utilization_pct || 0, 100) + '%'"></div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Headroom contribution row -->
+                <template x-if="stats.subscription_window.contribution && stats.subscription_window.contribution.tokens_submitted > 0">
+                    <div class="border-t border-border pt-3">
+                        <div class="text-xs text-gray-400 uppercase tracking-wide mb-2">Headroom Contribution This Window</div>
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <div>
+                                <div class="text-xs text-gray-500 mb-0.5">Efficiency</div>
+                                <div class="text-lg font-light tabular-nums text-accent"
+                                     x-text="(stats.subscription_window.contribution.efficiency_pct || 0).toFixed(1) + '%'"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-gray-500 mb-0.5">Tokens Saved</div>
+                                <div class="text-lg font-light tabular-nums text-emerald-400"
+                                     x-text="formatNumber(stats.subscription_window.contribution.tokens_saved?.total || 0)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-gray-500 mb-0.5">Compression</div>
+                                <div class="text-sm tabular-nums text-gray-300"
+                                     x-text="formatNumber(stats.subscription_window.contribution.tokens_saved?.compression || 0) + ' tok'"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-gray-500 mb-0.5">Cache Reads</div>
+                                <div class="text-sm tabular-nums text-cyan-400"
+                                     x-text="formatNumber(stats.subscription_window.contribution.tokens_saved?.cache_reads || 0) + ' tok'"></div>
+                            </div>
+                        </div>
+
+                        <!-- Efficiency bar: tokens submitted vs what would have been sent without headroom -->
+                        <template x-if="stats.subscription_window.contribution.raw_without_headroom > 0">
+                            <div class="mt-3">
+                                <div class="flex justify-between text-xs text-gray-500 mb-1">
+                                    <span>Raw vs Submitted</span>
+                                    <span x-text="formatNumber(stats.subscription_window.contribution.tokens_submitted) + ' / ' + formatNumber(stats.subscription_window.contribution.raw_without_headroom) + ' tokens forwarded'"></span>
+                                </div>
+                                <div class="w-full h-2 bg-border rounded-full overflow-hidden flex">
+                                    <div class="h-full bg-accent rounded-l-full"
+                                         :style="'width: ' + ((stats.subscription_window.contribution.tokens_submitted / stats.subscription_window.contribution.raw_without_headroom) * 100).toFixed(1) + '%'"></div>
+                                </div>
+                                <div class="flex gap-4 mt-1 text-xs text-gray-500">
+                                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-accent inline-block"></span>Forwarded to Anthropic</span>
+                                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-border inline-block"></span>Saved by Headroom</span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Discrepancies -->
+                <template x-if="stats.subscription_window.discrepancies && stats.subscription_window.discrepancies.length > 0">
+                    <div class="border-t border-border pt-3 mt-3">
+                        <div class="text-xs text-amber-400 uppercase tracking-wide mb-2">⚠ Anomalies Detected</div>
+                        <template x-for="d in stats.subscription_window.discrepancies" :key="d.kind + d.description">
+                            <div class="text-xs mb-1"
+                                 :class="d.severity === 'alert' ? 'text-red-400' : 'text-amber-400'"
+                                 x-text="d.description"></div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </template>
         <template x-if="(stats.prefix_cache?.totals?.requests || 0) > 0">
             <div class="bg-surface rounded-lg p-4 border border-border mb-6">
                 <div class="flex justify-between items-center mb-3">
@@ -946,6 +1075,15 @@
                     if (n >= 0.01) return n.toFixed(3);
                     if (n > 0) return n.toFixed(4);
                     return '0.00';
+                },
+
+                formatResetTime(seconds) {
+                    if (seconds == null || seconds <= 0) return 'now';
+                    const h = Math.floor(seconds / 3600);
+                    const m = Math.floor((seconds % 3600) / 60);
+                    if (h > 0) return h + 'h ' + m + 'm';
+                    if (m > 0) return m + 'm ' + Math.floor(seconds % 60) + 's';
+                    return Math.floor(seconds) + 's';
                 },
 
                 formatTime(ts) {

@@ -383,6 +383,15 @@ class AnthropicHandlerMixin:
         headers.pop("content-length", None)
         tags = self._extract_tags(headers)
 
+        # Subscription tracker: notify on OAuth requests (not API-key requests)
+        _auth_header = headers.get("authorization", "")
+        if _auth_header.startswith("Bearer ") and not _auth_header.startswith("Bearer sk-ant-api"):
+            from headroom.subscription.tracker import get_subscription_tracker as _get_sub_tracker
+
+            _sub_tracker = _get_sub_tracker()
+            if _sub_tracker is not None:
+                _sub_tracker.notify_active(_auth_header)
+
         # Rate limiting
         if self.rate_limiter:
             api_key = headers.get("x-api-key", "")
@@ -1358,6 +1367,22 @@ class AnthropicHandlerMixin:
                     cache_write_1h_tokens=cw_1h_tokens,
                     uncached_input_tokens=uncached_input_tokens,
                 )
+
+                # Subscription tracker: update headroom contribution counters
+                if _auth_header.startswith("Bearer ") and not _auth_header.startswith(
+                    "Bearer sk-ant-api"
+                ):
+                    from headroom.subscription.tracker import (
+                        get_subscription_tracker as _get_sub_tracker,
+                    )
+
+                    _sub_tracker = _get_sub_tracker()
+                    if _sub_tracker is not None:
+                        _sub_tracker.update_contribution(
+                            tokens_submitted=optimized_tokens,
+                            tokens_saved_compression=tokens_saved,
+                            tokens_saved_cache_reads=cr_tokens,
+                        )
 
                 # Log request
                 if self.logger:
