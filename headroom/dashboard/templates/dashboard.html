@@ -300,69 +300,80 @@
         <!-- Codex Rate-Limit Window -->
         <template x-if="stats.codex_rate_limits && stats.codex_rate_limits.primary">
             <div class="bg-surface rounded-lg p-4 border border-border mb-6">
-                <div class="flex justify-between items-center mb-3">
+                <div class="flex justify-between items-center mb-4">
                     <div class="text-sm font-medium text-gray-300">OpenAI Codex Rate-Limit Window</div>
-                    <div class="flex items-center gap-2">
-                        <template x-if="stats.codex_rate_limits.limit_name">
-                            <span class="text-xs text-gray-500 font-mono" x-text="stats.codex_rate_limits.limit_name"></span>
-                        </template>
-                        <template x-if="stats.codex_rate_limits.credits">
-                            <span class="text-xs font-mono"
-                                  :class="stats.codex_rate_limits.credits.unlimited ? 'text-purple-400' : stats.codex_rate_limits.credits.has_credits ? 'text-emerald-400' : 'text-red-400'"
-                                  x-text="stats.codex_rate_limits.credits.unlimited ? '∞ Unlimited' : stats.codex_rate_limits.credits.balance ? stats.codex_rate_limits.credits.balance : (stats.codex_rate_limits.credits.has_credits ? 'Credits' : 'No Credits')"></span>
-                        </template>
-                    </div>
-                </div>
-                <!-- Primary window -->
-                <div class="mb-3">
-                    <div class="flex justify-between items-center mb-1">
-                        <div class="flex items-center gap-2">
-                            <span class="text-xs text-gray-500">Primary</span>
-                            <template x-if="stats.codex_rate_limits.primary.window_label">
-                                <span class="text-xs text-gray-600 font-mono"
-                                      x-text="'(' + stats.codex_rate_limits.primary.window_label + ' window)'"></span>
-                            </template>
-                        </div>
-                        <span class="text-sm font-mono font-semibold"
-                              :class="(stats.codex_rate_limits.primary.used_percent||0) > 80 ? 'text-red-400' : (stats.codex_rate_limits.primary.used_percent||0) > 60 ? 'text-amber-400' : 'text-emerald-400'"
-                              x-text="(stats.codex_rate_limits.primary.used_percent||0).toFixed(1) + '%'"></span>
-                    </div>
-                    <div class="w-full bg-gray-700 rounded-full h-2">
-                        <div class="h-2 rounded-full transition-all duration-500"
-                             :class="(stats.codex_rate_limits.primary.used_percent||0) > 80 ? 'bg-red-500' : (stats.codex_rate_limits.primary.used_percent||0) > 60 ? 'bg-amber-500' : 'bg-emerald-500'"
-                             :style="'width: ' + Math.min(stats.codex_rate_limits.primary.used_percent||0, 100) + '%'"></div>
-                    </div>
-                    <template x-if="stats.codex_rate_limits.primary.seconds_until_reset !== null">
-                        <div class="text-xs text-gray-500 mt-1"
-                             x-text="'Resets in ' + formatResetTime(stats.codex_rate_limits.primary.seconds_until_reset)"></div>
+                    <template x-if="stats.codex_rate_limits.limit_name">
+                        <span class="text-xs text-gray-500 font-mono" x-text="stats.codex_rate_limits.limit_name"></span>
                     </template>
                 </div>
-                <!-- Secondary window (if present) -->
-                <template x-if="stats.codex_rate_limits.secondary">
-                    <div class="mb-3">
-                        <div class="flex justify-between items-center mb-1">
-                            <div class="flex items-center gap-2">
-                                <span class="text-xs text-gray-500">Secondary</span>
-                                <template x-if="stats.codex_rate_limits.secondary.window_label">
-                                    <span class="text-xs text-gray-600 font-mono"
-                                          x-text="'(' + stats.codex_rate_limits.secondary.window_label + ' window)'"></span>
+
+                <!-- Primary / Secondary window grid (mirrors Anthropic 5h/7d layout) -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <!-- Primary window -->
+                    <div>
+                        <div class="flex justify-between text-xs mb-1">
+                            <span class="text-gray-400 uppercase tracking-wide">Primary
+                                <template x-if="stats.codex_rate_limits.primary.window_label">
+                                    <span class="text-gray-600 normal-case font-mono ml-1"
+                                          x-text="'(' + stats.codex_rate_limits.primary.window_label + ')'"></span>
                                 </template>
-                            </div>
-                            <span class="text-sm font-mono font-semibold"
-                                  :class="(stats.codex_rate_limits.secondary.used_percent||0) > 80 ? 'text-red-400' : (stats.codex_rate_limits.secondary.used_percent||0) > 60 ? 'text-amber-400' : 'text-emerald-400'"
-                                  x-text="(stats.codex_rate_limits.secondary.used_percent||0).toFixed(1) + '%'"></span>
+                            </span>
+                            <span class="tabular-nums font-mono"
+                                  :class="(stats.codex_rate_limits.primary.used_percent||0) > 80 ? 'text-red-400' : (stats.codex_rate_limits.primary.used_percent||0) > 60 ? 'text-amber-400' : 'text-emerald-400'"
+                                  x-text="(stats.codex_rate_limits.primary.used_percent||0).toFixed(1) + '%'"></span>
                         </div>
-                        <div class="w-full bg-gray-700 rounded-full h-2">
-                            <div class="h-2 rounded-full transition-all duration-500"
-                                 :class="(stats.codex_rate_limits.secondary.used_percent||0) > 80 ? 'bg-red-500' : (stats.codex_rate_limits.secondary.used_percent||0) > 60 ? 'bg-amber-500' : 'bg-emerald-500'"
-                                 :style="'width: ' + Math.min(stats.codex_rate_limits.secondary.used_percent||0, 100) + '%'"></div>
+                        <div class="w-full h-3 bg-border rounded-full overflow-hidden">
+                            <div class="h-full rounded-full transition-all duration-500"
+                                 :class="(stats.codex_rate_limits.primary.used_percent||0) > 80 ? 'bg-red-500' : (stats.codex_rate_limits.primary.used_percent||0) > 60 ? 'bg-amber-500' : 'bg-emerald-500'"
+                                 :style="'width: ' + Math.min(stats.codex_rate_limits.primary.used_percent||0, 100) + '%'"></div>
                         </div>
-                        <template x-if="stats.codex_rate_limits.secondary.seconds_until_reset !== null">
+                        <template x-if="stats.codex_rate_limits.primary.seconds_until_reset !== null">
                             <div class="text-xs text-gray-500 mt-1"
-                                 x-text="'Resets in ' + formatResetTime(stats.codex_rate_limits.secondary.seconds_until_reset)"></div>
+                                 x-text="'Resets in ' + formatResetTime(stats.codex_rate_limits.primary.seconds_until_reset)"></div>
+                        </template>
+                    </div>
+                    <!-- Secondary window -->
+                    <template x-if="stats.codex_rate_limits.secondary">
+                        <div>
+                            <div class="flex justify-between text-xs mb-1">
+                                <span class="text-gray-400 uppercase tracking-wide">Secondary
+                                    <template x-if="stats.codex_rate_limits.secondary.window_label">
+                                        <span class="text-gray-600 normal-case font-mono ml-1"
+                                              x-text="'(' + stats.codex_rate_limits.secondary.window_label + ')'"></span>
+                                    </template>
+                                </span>
+                                <span class="tabular-nums font-mono"
+                                      :class="(stats.codex_rate_limits.secondary.used_percent||0) > 80 ? 'text-red-400' : (stats.codex_rate_limits.secondary.used_percent||0) > 60 ? 'text-amber-400' : 'text-emerald-400'"
+                                      x-text="(stats.codex_rate_limits.secondary.used_percent||0).toFixed(1) + '%'"></span>
+                            </div>
+                            <div class="w-full h-3 bg-border rounded-full overflow-hidden">
+                                <div class="h-full rounded-full transition-all duration-500"
+                                     :class="(stats.codex_rate_limits.secondary.used_percent||0) > 80 ? 'bg-red-500' : (stats.codex_rate_limits.secondary.used_percent||0) > 60 ? 'bg-amber-500' : 'bg-emerald-500'"
+                                     :style="'width: ' + Math.min(stats.codex_rate_limits.secondary.used_percent||0, 100) + '%'"></div>
+                            </div>
+                            <template x-if="stats.codex_rate_limits.secondary.seconds_until_reset !== null">
+                                <div class="text-xs text-gray-500 mt-1"
+                                     x-text="'Resets in ' + formatResetTime(stats.codex_rate_limits.secondary.seconds_until_reset)"></div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Credits section (mirrors Anthropic extra-usage section) -->
+                <template x-if="stats.codex_rate_limits.credits">
+                    <div class="border-t border-border pt-3 mb-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-xs text-gray-400 uppercase tracking-wide">Credits</span>
+                            <span class="text-sm font-mono font-medium"
+                                  :class="stats.codex_rate_limits.credits.unlimited ? 'text-purple-400' : stats.codex_rate_limits.credits.has_credits ? 'text-emerald-400' : 'text-red-400'"
+                                  x-text="stats.codex_rate_limits.credits.unlimited ? '∞ Unlimited' : stats.codex_rate_limits.credits.balance ? stats.codex_rate_limits.credits.balance : (stats.codex_rate_limits.credits.has_credits ? 'Active' : 'No Credits')"></span>
+                        </div>
+                        <template x-if="stats.codex_rate_limits.credits.balance && !stats.codex_rate_limits.credits.unlimited">
+                            <div class="text-xs text-gray-500 mt-0.5">Pay-as-you-go credits balance</div>
                         </template>
                     </div>
                 </template>
+
                 <!-- Promo message -->
                 <template x-if="stats.codex_rate_limits.promo_message">
                     <div class="mt-2 text-xs text-blue-400 italic"
@@ -371,10 +382,10 @@
             </div>
         </template>
 
-        <!-- GitHub Copilot Quota panel -->
+        <!-- GitHub Copilot Quota -->
         <template x-if="stats.copilot_quota && stats.copilot_quota.latest">
             <div class="bg-surface rounded-lg p-4 border border-border mb-6">
-                <div class="flex justify-between items-center mb-3">
+                <div class="flex justify-between items-center mb-4">
                     <div class="text-sm font-medium text-gray-300">GitHub Copilot Quota</div>
                     <div class="flex items-center gap-2">
                         <template x-if="stats.copilot_quota.latest.copilot_plan">
@@ -386,47 +397,83 @@
                     </div>
                 </div>
 
-                <!-- Per-category quota bars -->
-                <template x-for="[catKey, catLabel] in [['chat', 'Chat'], ['completions', 'Completions'], ['premium_interactions', 'Premium']]" :key="catKey">
-                    <template x-if="stats.copilot_quota.latest.categories[catKey]">
-                        <div class="mb-3">
-                            <div class="flex justify-between items-center mb-1">
-                                <span class="text-xs text-gray-400" x-text="catLabel"></span>
-                                <div class="flex items-center gap-2">
+                <!-- Per-category quota grid (3 columns, mirrors Anthropic 5h/7d structure) -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                    <template x-for="[catKey, catLabel] in [['chat','Chat'],['completions','Completions'],['premium_interactions','Premium']]" :key="catKey">
+                        <template x-if="stats.copilot_quota.latest.categories[catKey]">
+                            <div>
+                                <div class="flex justify-between text-xs mb-1">
+                                    <span class="text-gray-400 uppercase tracking-wide" x-text="catLabel"></span>
                                     <template x-if="stats.copilot_quota.latest.categories[catKey].unlimited">
-                                        <span class="text-xs text-purple-400">∞ Unlimited</span>
+                                        <span class="text-purple-400 font-mono">∞</span>
                                     </template>
                                     <template x-if="!stats.copilot_quota.latest.categories[catKey].unlimited">
-                                        <span class="text-xs font-mono"
-                                            :class="(stats.copilot_quota.latest.categories[catKey].used_percent||0) > 80 ? 'text-red-400' : (stats.copilot_quota.latest.categories[catKey].used_percent||0) > 50 ? 'text-amber-400' : 'text-emerald-400'"
-                                            x-text="(stats.copilot_quota.latest.categories[catKey].used_percent||0).toFixed(0) + '% used'"></span>
+                                        <span class="tabular-nums font-mono"
+                                              :class="(stats.copilot_quota.latest.categories[catKey].used_percent||0) > 80 ? 'text-red-400' : (stats.copilot_quota.latest.categories[catKey].used_percent||0) > 50 ? 'text-amber-400' : 'text-emerald-400'"
+                                              x-text="(stats.copilot_quota.latest.categories[catKey].used_percent||0).toFixed(0) + '%'"></span>
                                     </template>
-                                    <template x-if="stats.copilot_quota.latest.categories[catKey].remaining !== null && stats.copilot_quota.latest.categories[catKey].remaining !== undefined && !stats.copilot_quota.latest.categories[catKey].unlimited">
+                                </div>
+                                <!-- Used / entitlement count (big number like Anthropic window) -->
+                                <template x-if="!stats.copilot_quota.latest.categories[catKey].unlimited">
+                                    <div class="flex items-baseline gap-1 mb-1">
+                                        <span class="text-lg font-light tabular-nums"
+                                              :class="(stats.copilot_quota.latest.categories[catKey].used_percent||0) > 80 ? 'text-red-400' : (stats.copilot_quota.latest.categories[catKey].used_percent||0) > 50 ? 'text-amber-400' : 'text-emerald-400'"
+                                              x-text="stats.copilot_quota.latest.categories[catKey].used ?? '-'"></span>
                                         <span class="text-xs text-gray-500 font-mono"
-                                            x-text="stats.copilot_quota.latest.categories[catKey].remaining + ' left'"></span>
-                                    </template>
+                                              x-text="'/ ' + (stats.copilot_quota.latest.categories[catKey].entitlement ?? '∞')"></span>
+                                        <span class="text-xs text-gray-500 ml-auto font-mono"
+                                              x-text="(stats.copilot_quota.latest.categories[catKey].remaining ?? '') + ' left'"></span>
+                                    </div>
+                                </template>
+                                <template x-if="stats.copilot_quota.latest.categories[catKey].unlimited">
+                                    <div class="text-lg font-light text-purple-400 mb-1">Unlimited</div>
+                                </template>
+                                <!-- Progress bar -->
+                                <template x-if="!stats.copilot_quota.latest.categories[catKey].unlimited">
+                                    <div class="w-full h-3 bg-border rounded-full overflow-hidden">
+                                        <div class="h-full rounded-full transition-all duration-500"
+                                             :class="(stats.copilot_quota.latest.categories[catKey].used_percent||0) > 80 ? 'bg-red-500' : (stats.copilot_quota.latest.categories[catKey].used_percent||0) > 50 ? 'bg-amber-500' : 'bg-emerald-500'"
+                                             :style="'width: ' + Math.min(stats.copilot_quota.latest.categories[catKey].used_percent||0, 100) + '%'"></div>
+                                    </div>
+                                </template>
+                                <!-- Overage info -->
+                                <template x-if="stats.copilot_quota.latest.categories[catKey].overage_count > 0">
+                                    <div class="text-xs text-amber-400 mt-1"
+                                         x-text="stats.copilot_quota.latest.categories[catKey].overage_count + ' overage uses'"></div>
+                                </template>
+                                <div class="mt-1">
+                                    <span class="text-xs"
+                                          :class="stats.copilot_quota.latest.categories[catKey].overage_permitted ? 'text-gray-500' : 'text-gray-600'"
+                                          x-text="stats.copilot_quota.latest.categories[catKey].overage_permitted ? 'Overage allowed' : 'No overage'"></span>
                                 </div>
                             </div>
-                            <template x-if="!stats.copilot_quota.latest.categories[catKey].unlimited">
-                                <div class="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                                    <div class="h-full rounded-full transition-all duration-500"
-                                         :class="(stats.copilot_quota.latest.categories[catKey].used_percent||0) > 80 ? 'bg-red-500' : (stats.copilot_quota.latest.categories[catKey].used_percent||0) > 50 ? 'bg-amber-500' : 'bg-emerald-500'"
-                                         :style="'width: ' + Math.min(stats.copilot_quota.latest.categories[catKey].used_percent||0, 100) + '%'"></div>
-                                </div>
-                            </template>
-                            <template x-if="stats.copilot_quota.latest.categories[catKey].overage_count > 0">
-                                <div class="text-xs text-amber-400 mt-0.5"
-                                     x-text="stats.copilot_quota.latest.categories[catKey].overage_count + ' overage uses'"></div>
-                            </template>
+                        </template>
+                    </template>
+                </div>
+
+                <!-- Monthly reset section (mirrors Anthropic extra-usage border section) -->
+                <div class="border-t border-border pt-3">
+                    <div class="flex justify-between text-xs mb-2">
+                        <span class="text-gray-400 uppercase tracking-wide">Monthly Reset</span>
+                        <template x-if="stats.copilot_quota.latest.quota_reset_date_utc">
+                            <span class="text-gray-400 font-mono"
+                                  x-text="formatMonthlyReset(stats.copilot_quota.latest.quota_reset_date_utc)"></span>
+                        </template>
+                    </div>
+                    <template x-if="stats.copilot_quota.latest.quota_reset_date_utc">
+                        <div>
+                            <!-- Month-elapsed bar: filled = time elapsed, empty = time remaining -->
+                            <div class="w-full h-2 bg-border rounded-full overflow-hidden">
+                                <div class="h-full bg-accent/50 rounded-full transition-all duration-500"
+                                     :style="'width: ' + (100 - Math.min(100, Math.max(0, (new Date(stats.copilot_quota.latest.quota_reset_date_utc) - new Date()) / (30 * 86400000) * 100))) + '%'"></div>
+                            </div>
+                            <div class="flex justify-between text-xs text-gray-600 mt-0.5">
+                                <span>Month start</span>
+                                <span x-text="new Date(stats.copilot_quota.latest.quota_reset_date_utc).toLocaleDateString(undefined, {month:'short', day:'numeric'})"></span>
+                            </div>
                         </div>
                     </template>
-                </template>
-
-                <!-- Reset date -->
-                <template x-if="stats.copilot_quota.latest.quota_reset_date_utc">
-                    <div class="text-xs text-gray-500 mt-2"
-                         x-text="'Monthly quota resets: ' + stats.copilot_quota.latest.quota_reset_date_utc"></div>
-                </template>
+                </div>
             </div>
         </template>
 
@@ -1235,6 +1282,15 @@
                         month: 'short',
                         day: 'numeric',
                     });
+                },
+
+                formatMonthlyReset(dateStr) {
+                    if (!dateStr) return '-';
+                    const d = new Date(dateStr);
+                    const days = Math.ceil((d - new Date()) / 86400000);
+                    if (days <= 0) return 'today';
+                    if (days === 1) return 'tomorrow';
+                    return 'in ' + days + ' days (' + d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) + ')';
                 },
 
                 formatMonth(ts) {
