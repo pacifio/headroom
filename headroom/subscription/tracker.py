@@ -29,6 +29,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from headroom.subscription.base import QuotaTracker
 from headroom.subscription.client import SubscriptionClient
 from headroom.subscription.models import (
     HeadroomContribution,
@@ -63,24 +64,36 @@ def _get_persist_path() -> Path:
     return Path.home() / _DEFAULT_PERSIST_DIR / _DEFAULT_PERSIST_FILE
 
 
-class SubscriptionTracker:
+class SubscriptionTracker(QuotaTracker):
     """Background tracker for Anthropic Claude Code subscription windows.
+
+    Implements :class:`~headroom.subscription.base.QuotaTracker` so it can
+    be registered with :func:`~headroom.subscription.base.get_quota_registry`
+    alongside the Codex and Copilot trackers.
 
     Args:
         poll_interval_s: Seconds between polls while active (1–300).
         active_window_s: Seconds since last notify_active call that keeps
             polling alive (default 60 = 1 minute).
+        enabled: Set to ``False`` to disable tracking (mirrors
+            ``ProxyConfig.subscription_tracking_enabled``).
         persist_path: Where to persist state across restarts.
         client: Injected client (for testing); defaults to SubscriptionClient().
     """
+
+    # QuotaTracker identity
+    key = "subscription_window"
+    label = "Anthropic Claude Code"
 
     def __init__(
         self,
         poll_interval_s: int = _DEFAULT_POLL_INTERVAL_S,
         active_window_s: float = _DEFAULT_ACTIVE_WINDOW_S,
+        enabled: bool = True,
         persist_path: Path | None = None,
         client: SubscriptionClient | None = None,
     ) -> None:
+        self._enabled = enabled
         self._poll_interval_s = max(1, min(poll_interval_s, 300))
         self._active_window_s = max(5.0, active_window_s)
         self._persist_path = persist_path or _get_persist_path()
@@ -95,6 +108,18 @@ class SubscriptionTracker:
         self._poll_task: asyncio.Task[None] | None = None
 
         self._load_persisted_state()
+
+    # ------------------------------------------------------------------
+    # QuotaTracker interface
+    # ------------------------------------------------------------------
+
+    def is_available(self) -> bool:
+        """Returns ``True`` when subscription tracking is enabled in config."""
+        return self._enabled
+
+    def get_stats(self) -> dict[str, Any] | None:
+        """Return current tracker state dict for ``/stats``."""
+        return self.state
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -408,6 +433,7 @@ def get_subscription_tracker() -> SubscriptionTracker | None:
 def configure_subscription_tracker(
     poll_interval_s: int = _DEFAULT_POLL_INTERVAL_S,
     active_window_s: float = _DEFAULT_ACTIVE_WINDOW_S,
+    enabled: bool = True,
     persist_path: Path | None = None,
     client: SubscriptionClient | None = None,
 ) -> SubscriptionTracker:
@@ -418,6 +444,7 @@ def configure_subscription_tracker(
             _tracker_instance = SubscriptionTracker(
                 poll_interval_s=poll_interval_s,
                 active_window_s=active_window_s,
+                enabled=enabled,
                 persist_path=persist_path,
                 client=client,
             )

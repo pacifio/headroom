@@ -1,5 +1,11 @@
 """Subscription window tracking for Anthropic Claude Code accounts and Codex rate limits."""
 
+from headroom.subscription.base import (
+    QuotaTracker,
+    QuotaTrackerRegistry,
+    get_quota_registry,
+    reset_quota_registry,
+)
 from headroom.subscription.client import SubscriptionClient, read_cached_oauth_token
 from headroom.subscription.codex_rate_limits import (
     CodexCreditsSnapshot,
@@ -43,6 +49,8 @@ __all__ = [
     "CopilotQuotaState",
     "ExtraUsage",
     "HeadroomContribution",
+    "QuotaTracker",
+    "QuotaTrackerRegistry",
     "RateLimitWindow",
     "SubscriptionClient",
     "SubscriptionSnapshot",
@@ -54,9 +62,11 @@ __all__ = [
     "discover_github_token",
     "get_codex_rate_limit_state",
     "get_copilot_quota_tracker",
+    "get_quota_registry",
     "get_subscription_tracker",
     "parse_codex_rate_limits",
     "parse_copilot_quota",
     "read_cached_oauth_token",
+    "reset_quota_registry",
     "shutdown_subscription_tracker",
 ]

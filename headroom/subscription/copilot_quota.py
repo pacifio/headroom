@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
+from headroom.subscription.base import QuotaTracker
+
 logger = logging.getLogger(__name__)
 
 _GITHUB_API_BASE = "https://api.github.com"
@@ -196,8 +198,17 @@ def discover_github_token() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-class _CopilotQuotaTracker:
-    """Singleton background poller for GitHub Copilot quota."""
+class _CopilotQuotaTracker(QuotaTracker):
+    """Singleton background poller for GitHub Copilot quota.
+
+    Implements :class:`~headroom.subscription.base.QuotaTracker` so it can be
+    registered with the :class:`~headroom.subscription.base.QuotaTrackerRegistry`.
+    Availability is gated on a GitHub token being present in the environment.
+    """
+
+    # QuotaTracker identity
+    key = "copilot_quota"
+    label = "GitHub Copilot"
 
     def __init__(self, poll_interval_s: float = 60.0) -> None:
         self._poll_interval_s = poll_interval_s
@@ -205,6 +216,21 @@ class _CopilotQuotaTracker:
         self._lock = Lock()
         self._stop_event: asyncio.Event | None = None
         self._task: asyncio.Task | None = None  # type: ignore[type-arg]
+
+    # ------------------------------------------------------------------
+    # QuotaTracker interface
+    # ------------------------------------------------------------------
+
+    def is_available(self) -> bool:
+        """Returns ``True`` when a GitHub token is available in the environment."""
+        return discover_github_token() is not None
+
+    def get_stats(self) -> dict[str, Any] | None:
+        """Return the latest quota state dict, or ``None`` if no data yet."""
+        data = self.state
+        if not data.get("latest"):
+            return None
+        return data
 
     # ------------------------------------------------------------------
     # Lifecycle

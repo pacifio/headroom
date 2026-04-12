@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from threading import Lock
 
+from headroom.subscription.base import QuotaTracker
+
 
 @dataclass
 class CodexRateLimitWindow:
@@ -195,12 +197,19 @@ def parse_codex_rate_limits(headers: dict[str, str]) -> CodexRateLimitSnapshot |
 # ---------------------------------------------------------------------------
 
 
-class CodexRateLimitState:
+class CodexRateLimitState(QuotaTracker):
     """Thread-safe store for the latest Codex rate-limit snapshot.
 
-    Updated by the OpenAI proxy handler each time a response containing
-    ``x-codex-*`` headers passes through headroom.
+    Implements :class:`~headroom.subscription.base.QuotaTracker` so it can
+    be registered with the :class:`~headroom.subscription.base.QuotaTrackerRegistry`.
+    This tracker is *passive* — it is updated by the OpenAI proxy handler
+    each time a response containing ``x-codex-*`` headers passes through
+    headroom, so :meth:`start` and :meth:`stop` are no-ops.
     """
+
+    # QuotaTracker identity
+    key = "codex_rate_limits"
+    label = "OpenAI Codex"
 
     def __init__(self) -> None:
         self._lock = Lock()

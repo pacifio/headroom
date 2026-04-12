@@ -127,12 +127,12 @@ from headroom.proxy.prometheus_metrics import PrometheusMetrics  # noqa: F401
 from headroom.proxy.rate_limiter import TokenBucketRateLimiter  # noqa: F401
 from headroom.proxy.request_logger import RequestLogger  # noqa: F401
 from headroom.proxy.semantic_cache import SemanticCache  # noqa: F401
+from headroom.subscription.base import get_quota_registry
 from headroom.subscription.codex_rate_limits import get_codex_rate_limit_state
-from headroom.subscription.copilot_quota import discover_github_token, get_copilot_quota_tracker
+from headroom.subscription.copilot_quota import get_copilot_quota_tracker
 from headroom.subscription.tracker import (
     configure_subscription_tracker,
     get_subscription_tracker,
-    shutdown_subscription_tracker,
 )
 from headroom.telemetry import get_telemetry_collector
 from headroom.telemetry.beacon import is_telemetry_enabled
@@ -154,19 +154,6 @@ from headroom.transforms import (
 _build_prefix_cache_stats = build_prefix_cache_stats
 _build_session_summary = build_session_summary
 _merge_cost_stats = merge_cost_stats
-
-
-def _get_codex_rate_limit_stats() -> dict | None:
-    """Return the latest Codex rate-limit snapshot for the /stats endpoint."""
-    return get_codex_rate_limit_state().get_stats()
-
-
-def _get_copilot_quota_stats() -> dict | None:
-    """Return the latest GitHub Copilot quota snapshot for the /stats endpoint."""
-    state = get_copilot_quota_tracker().state
-    if state.get("latest") is None and state.get("last_error") is None:
-        return None
-    return state
 
 
 logging.basicConfig(
@@ -683,13 +670,19 @@ class HeadroomProxy(
             logger.info("CCR: DISABLED")
         logger.info(f"Savings history: {self.metrics.savings_tracker.storage_path}")
 
-        # Subscription window tracker (Anthropic OAuth accounts)
+        # Register all quota trackers and start them via the registry
+        registry = get_quota_registry()
+        tracker = configure_subscription_tracker(
+            poll_interval_s=self.config.subscription_poll_interval_s,
+            active_window_s=self.config.subscription_active_window_s,
+            enabled=self.config.subscription_tracking_enabled,
+        )
+        registry.register(tracker)
+        registry.register(get_codex_rate_limit_state())
+        registry.register(get_copilot_quota_tracker())
+        await registry.start_all()
+
         if self.config.subscription_tracking_enabled:
-            tracker = configure_subscription_tracker(
-                poll_interval_s=self.config.subscription_poll_interval_s,
-                active_window_s=self.config.subscription_active_window_s,
-            )
-            await tracker.start()
             logger.info(
                 "Subscription tracking: ENABLED "
                 f"(poll_interval={self.config.subscription_poll_interval_s}s, "
@@ -698,10 +691,8 @@ class HeadroomProxy(
         else:
             logger.info("Subscription tracking: DISABLED")
 
-        # Start GitHub Copilot quota tracking if a GitHub token is available
-        if discover_github_token():
-            copilot_tracker = get_copilot_quota_tracker()
-            await copilot_tracker.start()
+        copilot_tracker = get_copilot_quota_tracker()
+        if copilot_tracker.is_available():
             logger.info("GitHub Copilot quota tracking: ENABLED")
         else:
             logger.info(
@@ -727,11 +718,8 @@ class HeadroomProxy(
         if self.memory_handler and hasattr(self.memory_handler, "close"):
             await self.memory_handler.close()
 
-        # Stop subscription tracker
-        await shutdown_subscription_tracker()
-
-        # Stop Copilot quota tracker
-        await get_copilot_quota_tracker().stop()
+        # Stop all quota trackers via the registry
+        await get_quota_registry().stop_all()
 
         # Print final stats
         self._print_summary()
@@ -1420,11 +1408,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             "cache": await proxy.cache.stats() if proxy.cache else None,
             "rate_limiter": await proxy.rate_limiter.stats() if proxy.rate_limiter else None,
             "recent_requests": proxy.logger.get_recent(10) if proxy.logger else [],
-            "subscription_window": get_subscription_tracker().state
-            if get_subscription_tracker()
-            else None,
-            "codex_rate_limits": _get_codex_rate_limit_stats(),
-            "copilot_quota": _get_copilot_quota_stats(),
+            **get_quota_registry().get_all_stats(),
         }
 
     @app.get("/stats-history")
@@ -1453,6 +1437,11 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 content={"error": "Subscription tracking is not enabled"},
             )
         return JSONResponse(content=tracker.state)
+
+    @app.get("/quota")
+    async def quota():
+        """Unified quota/rate-limit stats for all registered providers (Anthropic, Codex, Copilot)."""
+        return JSONResponse(content=get_quota_registry().get_all_stats())
 
     @app.get("/metrics")
     async def metrics():
